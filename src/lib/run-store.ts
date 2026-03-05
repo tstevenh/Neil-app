@@ -91,6 +91,22 @@ async function getRunRowById(id: string): Promise<RunRow | null> {
   return data as RunRow;
 }
 
+async function getRunResults(id: string): Promise<CompareResult[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabaseAdmin = getSupabaseAdmin() as any;
+  const { data: rows, error } = await supabaseAdmin
+    .from("qa_run_results")
+    .select("row_index,result")
+    .eq("run_id", id)
+    .order("row_index", { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to fetch run results: ${error.message}`);
+  }
+
+  return ((rows ?? []) as RunResultRow[]).map((row) => row.result);
+}
+
 async function appendResult(id: string, index: number, result: CompareResult) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabaseAdmin = getSupabaseAdmin() as any;
@@ -363,6 +379,27 @@ export async function cancelRun(userId: string, id: string) {
   return mapRun(updated, []);
 }
 
+export async function retryFailedRows(userId: string, id: string) {
+  const run = await getRunRowById(id);
+  if (!run || run.user_id !== userId) {
+    return null;
+  }
+
+  const results = await getRunResults(id);
+  const failedPairs = results
+    .filter((result) => result.overallStatus === "FAIL")
+    .map((result) => ({
+      productionUrl: result.productionUrl,
+      stagingUrl: result.stagingUrl,
+    }));
+
+  if (failedPairs.length === 0) {
+    return null;
+  }
+
+  return createRun(userId, failedPairs);
+}
+
 export async function getRunById(id: string) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabaseAdmin = getSupabaseAdmin() as any;
@@ -384,17 +421,7 @@ export async function getRunById(id: string) {
     return null;
   }
 
-  const { data: rows, error: resultsError } = await supabaseAdmin
-    .from("qa_run_results")
-    .select("row_index,result")
-    .eq("run_id", id)
-    .order("row_index", { ascending: true });
-
-  if (resultsError) {
-    throw new Error(`Failed to fetch run results: ${resultsError.message}`);
-  }
-
-  return mapRun(refreshedRun, ((rows ?? []) as RunResultRow[]).map((row) => row.result));
+  return mapRun(refreshedRun, await getRunResults(id));
 }
 
 export async function getRunsByUser(userId: string) {

@@ -23,6 +23,7 @@ export default function Home() {
   const [expandedResultRow, setExpandedResultRow] = useState<string | null>(null);
   const [runSourceLabels, setRunSourceLabels] = useState<Record<string, string>>({});
   const [cancelingRunIds, setCancelingRunIds] = useState<Record<string, boolean>>({});
+  const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
 
   async function getCurrentAccessToken() {
     const supabase = getSupabaseBrowser();
@@ -254,6 +255,29 @@ export default function Home() {
       setMessage("Network error while canceling run");
     } finally {
       setCancelingRunIds((current) => ({ ...current, [runId]: false }));
+    }
+  }
+
+  async function retryFailedRowsForRun(runId: string) {
+    const source = runSourceLabels[runId] ?? "Run";
+    setRetryingRunId(runId);
+    try {
+      const response = await apiFetch(`/api/runs/${runId}/retry-failed`, {
+        method: "POST",
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setMessage(data.error ?? "Failed to retry failed rows");
+        return;
+      }
+
+      saveRunLabel(data.runId, `Retry Failed - ${source}`);
+      await refreshRuns();
+      setMessage(`Retry run started: ${data.runId}`);
+    } catch {
+      setMessage("Network error while retrying failed rows");
+    } finally {
+      setRetryingRunId(null);
     }
   }
 
@@ -546,8 +570,20 @@ export default function Home() {
           </section>
 
           <section className={`min-w-0 space-y-3 p-4 ${cardClass}`}>
-            <div className="flex flex-col gap-1 border-b border-[#deedf1] pb-3">
-              <h3 className="text-lg font-medium text-[#101828]">Run Details</h3>
+            <div className="flex flex-col gap-2 border-b border-[#deedf1] pb-3">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-lg font-medium text-[#101828]">Run Details</h3>
+                {selectedRun && (selectedRunSummary?.failCount ?? 0) > 0 ? (
+                  <button
+                    type="button"
+                    className={smallButtonClass}
+                    disabled={retryingRunId === selectedRun.id}
+                    onClick={() => void retryFailedRowsForRun(selectedRun.id)}
+                  >
+                    {retryingRunId === selectedRun.id ? "Retrying..." : "Re-run Failed Rows"}
+                  </button>
+                ) : null}
+              </div>
               {selectedRun ? (
                 <>
                   <p className="text-xs text-[#5a6a74]">
