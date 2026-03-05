@@ -24,18 +24,55 @@ export default function Home() {
   const [runSourceLabels, setRunSourceLabels] = useState<Record<string, string>>({});
   const [cancelingRunIds, setCancelingRunIds] = useState<Record<string, boolean>>({});
 
+  async function getCurrentAccessToken() {
+    const supabase = getSupabaseBrowser();
+    const { data } = await supabase.auth.getSession();
+    const currentToken = data.session?.access_token ?? null;
+    setToken(currentToken);
+    return currentToken;
+  }
+
   async function apiFetch(path: string, init?: RequestInit) {
-    if (!token) {
+    const currentToken = await getCurrentAccessToken();
+    if (!currentToken) {
+      router.replace("/signin");
       throw new Error("You must be logged in.");
     }
 
-    const headers = new Headers(init?.headers);
-    headers.set("authorization", `Bearer ${token}`);
+    const buildHeaders = (accessToken: string) => {
+      const headers = new Headers(init?.headers);
+      headers.set("authorization", `Bearer ${accessToken}`);
+      return headers;
+    };
 
-    return fetch(path, {
+    let response = await fetch(path, {
       ...init,
-      headers,
+      headers: buildHeaders(currentToken),
     });
+
+    if (response.status === 401) {
+      const supabase = getSupabaseBrowser();
+      const { data } = await supabase.auth.refreshSession();
+      const refreshedToken = data.session?.access_token ?? null;
+      setToken(refreshedToken);
+
+      if (!refreshedToken) {
+        router.replace("/signin");
+        throw new Error("Session expired. Please sign in again.");
+      }
+
+      response = await fetch(path, {
+        ...init,
+        headers: buildHeaders(refreshedToken),
+      });
+
+      if (response.status === 401) {
+        router.replace("/signin");
+        throw new Error("Session expired. Please sign in again.");
+      }
+    }
+
+    return response;
   }
 
   async function refreshRuns() {
@@ -159,6 +196,14 @@ export default function Home() {
   }
 
   async function downloadCsv(runId: string) {
+    const sourceName = runSourceLabels[runId];
+    const normalizedBase = (sourceName || "")
+      .replace(/\.csv$/i, "")
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const exportFilename = `${normalizedBase || `qa-report-${runId}`} audited.csv`;
+
     try {
       const response = await apiFetch(`/api/runs/${runId}/export`);
       if (!response.ok) {
@@ -171,7 +216,7 @@ export default function Home() {
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `qa-report-${runId}.csv`;
+      anchor.download = exportFilename;
       anchor.click();
       URL.revokeObjectURL(url);
     } catch {
@@ -311,8 +356,8 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen bg-[#f3fbfd] p-5 text-slate-900 md:p-7">
-      <div className="mx-auto max-w-7xl space-y-6">
+    <main className="min-h-screen overflow-x-hidden bg-[#f3fbfd] p-4 text-slate-900 md:p-7">
+      <div className="mx-auto min-w-0 max-w-7xl space-y-6">
         <header className={`flex flex-col gap-4 p-6 md:flex-row md:items-center md:justify-between ${cardClass}`}>
           <div className="space-y-2">
             <Image src="/digirx-logo.svg" alt="DigiRX" width={144} height={50} />
@@ -348,8 +393,8 @@ export default function Home() {
           </div>
         </section>
 
-        <section className={`grid gap-4 p-6 md:grid-cols-2 ${cardClass}`}>
-          <div className="space-y-3 rounded-2xl border border-[#deedf1] bg-white p-4">
+        <section className={`grid min-w-0 gap-4 p-6 md:grid-cols-2 ${cardClass}`}>
+          <div className="min-w-0 space-y-3 rounded-2xl border border-[#deedf1] bg-white p-4">
             <h2 className="text-xl font-medium text-[#101828]">Single Compare</h2>
             <input
               className="w-full rounded-xl border border-[#d2e6ea] bg-white px-4 py-2.5 text-sm outline-none transition focus:border-[#6cc8dd]"
@@ -368,7 +413,7 @@ export default function Home() {
             </button>
           </div>
 
-          <div className="space-y-3 rounded-2xl border border-[#deedf1] bg-white p-4">
+          <div className="min-w-0 space-y-3 rounded-2xl border border-[#deedf1] bg-white p-4">
             <h2 className="text-xl font-medium text-[#101828]">Bulk Upload (CSV)</h2>
             <p className="text-xs text-[#5a6a74]">
               Supports: `production_url/staging_url` or `Production URL/Staging URL`. Max 150 rows.
@@ -376,6 +421,7 @@ export default function Home() {
             <input
               type="file"
               accept=".csv"
+              className="block w-full max-w-full text-sm text-[#234167] file:mr-3 file:rounded-full file:border file:border-[#d4e5ea] file:bg-white file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-[#234167] file:transition file:hover:bg-[#f3fbfd]"
               onChange={(event) => setBulkFile(event.target.files?.[0] ?? null)}
             />
             <button type="button" className={primaryButtonClass} onClick={startBulkCompare}>
@@ -391,9 +437,9 @@ export default function Home() {
         ) : null}
 
         {activeRuns.length > 0 ? (
-          <section className={`p-5 ${cardClass}`}>
+          <section className={`min-w-0 p-5 ${cardClass}`}>
             <h3 className="text-lg font-medium text-[#101828]">Active Runs</h3>
-            <div className="mt-3 overflow-x-auto rounded-2xl border border-[#deedf1]">
+            <div className="mt-3 w-full overflow-x-auto rounded-2xl border border-[#deedf1]">
               <table className="min-w-full text-sm">
                 <thead className="bg-[#e3faff] text-left text-[#234167]">
                   <tr>
@@ -429,13 +475,13 @@ export default function Home() {
           </section>
         ) : null}
 
-        <section className="space-y-4">
-          <section className={`overflow-hidden ${cardClass}`}>
+        <section className="min-w-0 space-y-4">
+          <section className={`min-w-0 overflow-hidden ${cardClass}`}>
             <div className="border-b border-[#deedf1] p-4">
               <h2 className="text-lg font-medium text-[#101828]">Recent Runs</h2>
             </div>
 
-            <div className="overflow-x-auto">
+            <div className="w-full overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead className="bg-[#e3faff] text-left text-[#234167]">
                   <tr>
@@ -459,7 +505,7 @@ export default function Home() {
                           {run.id}
                         </button>
                       </td>
-                      <td className="p-3">{runSourceText(run)}</td>
+                      <td className="p-3 break-words">{runSourceText(run)}</td>
                       <td className="p-3 capitalize">{run.status}</td>
                       <td className="p-3">{run.progress}%</td>
                       <td className="p-3">{run.total}</td>
@@ -479,7 +525,7 @@ export default function Home() {
             </div>
           </section>
 
-          <section className={`space-y-3 p-4 ${cardClass}`}>
+          <section className={`min-w-0 space-y-3 p-4 ${cardClass}`}>
             <div className="flex flex-col gap-1 border-b border-[#deedf1] pb-3">
               <h3 className="text-lg font-medium text-[#101828]">Run Details</h3>
               {selectedRun ? (
@@ -496,7 +542,7 @@ export default function Home() {
             ) : null}
             {expandedRun ? (
               selectedRun ? (
-                <div className="overflow-x-auto rounded-[20px] border border-[#deedf1]">
+                <div className="w-full overflow-x-auto rounded-[20px] border border-[#deedf1]">
                   <table className="min-w-full text-xs">
                     <thead className="bg-[#e3faff] text-left text-[#234167]">
                       <tr>
