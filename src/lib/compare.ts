@@ -7,6 +7,40 @@ import type { BadLink, CompareResult, UrlPair } from "@/lib/types";
 
 const MAX_LINKS_PER_PAGE = 200;
 const REQUEST_TIMEOUT_MS = 10_000;
+const BLOCKED_RETRIES = 2;
+const BLOCKED_RETRY_DELAY_MS = 1200;
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function looksBlocked(title: string, html: string) {
+  const normalizedTitle = (title ?? "").toLowerCase();
+  const snippet = (html ?? "").slice(0, 5000).toLowerCase();
+  return (
+    normalizedTitle.includes("just a moment") ||
+    snippet.includes("cf-browser-verification") ||
+    snippet.includes("attention required") ||
+    snippet.includes("captcha")
+  );
+}
+
+async function fetchWithBlockedRetry(url: string) {
+  let attempts = 0;
+  let lastPage = await fetchPage(url);
+
+  while (looksBlocked(lastPage.title, lastPage.html) && attempts < BLOCKED_RETRIES) {
+    attempts += 1;
+    await delay(BLOCKED_RETRY_DELAY_MS);
+    lastPage = await fetchPage(url);
+  }
+
+  return {
+    page: lastPage,
+    blocked: looksBlocked(lastPage.title, lastPage.html),
+    attempts,
+  };
+}
 
 function computeOverallStatus(input: {
   titleMatch: boolean;
@@ -120,22 +154,26 @@ export async function comparePair(pair: UrlPair): Promise<CompareResult> {
     assertSafePublicUrl(pair.stagingUrl);
   }
 
-  const prodPage = hasProduction ? await fetchPage(pair.productionUrl) : null;
-  const stagingPage = hasStaging ? await fetchPage(pair.stagingUrl) : null;
+  const prodFetch = hasProduction ? await fetchWithBlockedRetry(pair.productionUrl) : null;
+  const stagingFetch = hasStaging ? await fetchWithBlockedRetry(pair.stagingUrl) : null;
+  const prodPage = prodFetch?.page ?? null;
+  const stagingPage = stagingFetch?.page ?? null;
+  const prodBlocked = Boolean(prodFetch?.blocked);
+  const stagingBlocked = Boolean(stagingFetch?.blocked);
 
   const prodTitle = normalizeMetaText(prodPage?.title);
   const stagingTitle = normalizeMetaText(stagingPage?.title);
   const prodDescription = normalizeMetaText(prodPage?.description);
   const stagingDescription = normalizeMetaText(stagingPage?.description);
 
-  const titleMatch = hasProduction && hasStaging ? prodTitle === stagingTitle : false;
+  const titleMatch = hasProduction && hasStaging && !prodBlocked && !stagingBlocked ? prodTitle === stagingTitle : false;
   const descriptionMatch =
-    hasProduction && hasStaging ? prodDescription === stagingDescription : false;
+    hasProduction && hasStaging && !prodBlocked && !stagingBlocked ? prodDescription === stagingDescription : false;
   const prodSlug = prodPage ? normalizeSlug(prodPage.finalUrl) : "";
   const stagingSlug = stagingPage ? normalizeSlug(stagingPage.finalUrl) : "";
-  const slugMatch = hasProduction && hasStaging ? prodSlug === stagingSlug : false;
+  const slugMatch = hasProduction && hasStaging && !prodBlocked && !stagingBlocked ? prodSlug === stagingSlug : false;
 
-  const linkAnalysis = prodPage
+  const linkAnalysis = prodPage && !prodBlocked
     ? await analyzeProductionLinks(prodPage.finalUrl, prodPage.html)
     : { totalLinks: 0, brokenLinks: [], hashLinks: [], anchorLinks: [] };
   const warnings: string[] = [];
@@ -147,12 +185,33 @@ export async function comparePair(pair: UrlPair): Promise<CompareResult> {
     warnings.push("Staging URL is missing");
   }
 
-  if ((hasProduction || hasStaging) && (!prodTitle || !stagingTitle)) {
+  if (prodBlocked) {
+    warnings.push("BLOCKED: Production blocked by bot protection");
+    if ((prodFetch?.attempts ?? 0) > 0) {
+      warnings.push(`Production retried ${prodFetch?.attempts}x but remained blocked`);
+    }
+  }
+  if (stagingBlocked) {
+    warnings.push("BLOCKED: Staging blocked by bot protection");
+    if ((stagingFetch?.attempts ?? 0) > 0) {
+      warnings.push(`Staging retried ${stagingFetch?.attempts}x but remained blocked`);
+    }
+  }
+
+  if ((hasProduction || hasStaging) && (!prodTitle || !stagingTitle) && !prodBlocked && !stagingBlocked) {
     warnings.push("Missing title on one or both pages");
   }
 
-  if ((hasProduction || hasStaging) && (!prodDescription || !stagingDescription)) {
+  if (
+    (hasProduction || hasStaging) &&
+    (!prodDescription || !stagingDescription) &&
+    !prodBlocked &&
+    !stagingBlocked
+  ) {
     warnings.push("Missing description on one or both pages");
+  }
+  if (hasProduction && prodBlocked) {
+    warnings.push("Skipped production 404/# link checks because page is blocked");
   }
 
   const brokenLinksCount = linkAnalysis.brokenLinks.length;

@@ -63,8 +63,17 @@ export function buildResultsCsv(results: CompareResult[]): string {
     return item.slugMatch ? "YES" : "NO";
   };
 
+  const hasBlockedWarning = (item: CompareResult, side: "production" | "staging") =>
+    item.warnings.some((warning) =>
+      side === "production"
+        ? warning.toLowerCase().includes("blocked: production")
+        : warning.toLowerCase().includes("blocked: staging"),
+    );
+
   const buildNotes = (item: CompareResult) => {
     const notes: string[] = [];
+    const productionBlocked = hasBlockedWarning(item, "production");
+    const stagingBlocked = hasBlockedWarning(item, "staging");
 
     if (!clean(item.productionUrl)) {
       notes.push("URL not available in Production");
@@ -73,22 +82,28 @@ export function buildResultsCsv(results: CompareResult[]): string {
       notes.push("URL not available in Staging");
     }
 
-    if (!item.titleMatch && clean(item.productionUrl) && clean(item.stagingUrl)) {
+    if (!item.titleMatch && clean(item.productionUrl) && clean(item.stagingUrl) && !productionBlocked && !stagingBlocked) {
       notes.push("Title mismatch");
     }
-    if (!item.descriptionMatch && clean(item.productionUrl) && clean(item.stagingUrl)) {
+    if (
+      !item.descriptionMatch &&
+      clean(item.productionUrl) &&
+      clean(item.stagingUrl) &&
+      !productionBlocked &&
+      !stagingBlocked
+    ) {
       notes.push("Meta description mismatch");
     }
-    if (!clean(item.prodTitle)) {
+    if (!clean(item.prodTitle) && !productionBlocked) {
       notes.push("Missing production title");
     }
-    if (!clean(item.stagingTitle)) {
+    if (!clean(item.stagingTitle) && !stagingBlocked) {
       notes.push("Missing staging title");
     }
-    if (!clean(item.prodDescription)) {
+    if (!clean(item.prodDescription) && !productionBlocked) {
       notes.push("Missing production meta description");
     }
-    if (!clean(item.stagingDescription)) {
+    if (!clean(item.stagingDescription) && !stagingBlocked) {
       notes.push("Missing staging meta description");
     }
     if (item.brokenLinksCount > 0) {
@@ -104,8 +119,14 @@ export function buildResultsCsv(results: CompareResult[]): string {
     if (item.error) {
       notes.push(`Error: ${clean(item.error)}`);
     }
+    for (const warning of item.warnings) {
+      const normalized = clean(warning);
+      if (normalized) {
+        notes.push(normalized);
+      }
+    }
 
-    return notes.join("; ");
+    return Array.from(new Set(notes)).join("; ");
   };
 
   return stringify(

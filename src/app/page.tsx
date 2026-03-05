@@ -321,6 +321,17 @@ export default function Home() {
     () => (expandedRun ? runDetailsById[expandedRun] ?? null : null),
     [expandedRun, runDetailsById],
   );
+  const selectedRunSummary = useMemo(() => {
+    if (!selectedRun) {
+      return null;
+    }
+    const blockedCount = selectedRun.results.filter((result) =>
+      result.warnings.some((warning) => warning.toLowerCase().includes("blocked:")),
+    ).length;
+    const passCount = selectedRun.results.filter((result) => result.overallStatus === "PASS").length;
+    const failCount = selectedRun.results.length - passCount;
+    return { passCount, failCount, blockedCount };
+  }, [selectedRun]);
 
   const displayValue = (value: string) => value.trim() || "Missing";
   const isMissingValue = (value: string) => !value.trim();
@@ -529,10 +540,18 @@ export default function Home() {
             <div className="flex flex-col gap-1 border-b border-[#deedf1] pb-3">
               <h3 className="text-lg font-medium text-[#101828]">Run Details</h3>
               {selectedRun ? (
-                <p className="text-xs text-[#5a6a74]">
-                  Source: <span className="font-medium text-[#234167]">{runSourceText(selectedRun)}</span> | Run ID:{" "}
-                  <span className="font-mono">{selectedRun.id}</span>
-                </p>
+                <>
+                  <p className="text-xs text-[#5a6a74]">
+                    Source: <span className="font-medium text-[#234167]">{runSourceText(selectedRun)}</span> | Run ID:{" "}
+                    <span className="font-mono">{selectedRun.id}</span>
+                  </p>
+                  <p className="text-xs text-[#5a6a74]">
+                    Pass {selectedRunSummary?.passCount ?? 0} | Fail {selectedRunSummary?.failCount ?? 0} | Blocked{" "}
+                    <span className={(selectedRunSummary?.blockedCount ?? 0) > 0 ? "font-semibold text-rose-600" : ""}>
+                      {selectedRunSummary?.blockedCount ?? 0}
+                    </span>
+                  </p>
+                </>
               ) : null}
             </div>
             {!expandedRun ? (
