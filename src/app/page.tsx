@@ -80,14 +80,23 @@ export default function Home() {
       return;
     }
 
-    const response = await apiFetch("/api/runs");
-    const data = await response.json();
-    if (!response.ok) {
-      setMessage(data.error ?? "Failed to fetch runs");
-      return;
-    }
+    try {
+      const response = await apiFetch("/api/runs");
+      const data = await response.json();
+      if (!response.ok) {
+        setMessage(data.error ?? "Failed to fetch runs");
+        return;
+      }
 
-    setRuns(data.runs ?? []);
+      setRuns(data.runs ?? []);
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : "Failed to fetch runs";
+      if (messageText.toLowerCase().includes("session expired")) {
+        setToken(null);
+        setRuns([]);
+      }
+      setMessage(messageText);
+    }
   }
 
   async function loadRunDetails(runId: string) {

@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { CompareResult, RunRecord, RunStatus, UrlPair } from "@/lib/types";
 import { comparePair } from "@/lib/compare";
+import { MAX_RUNNING_RUNS_PER_USER, ROW_PACING_DELAY_MS } from "@/lib/runtime-config";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
-const MAX_RUNNING_RUNS_PER_USER = 3;
-const pendingRunPairs = new Map<string, UrlPair[]>();
+const PROCESS_ROWS_PER_TICK = 1;
 
 type RunRow = {
   id: string;
@@ -21,6 +21,13 @@ type RunRow = {
 type RunResultRow = {
   row_index: number;
   result: CompareResult;
+};
+
+type RunInputRow = {
+  run_id: string;
+  row_index: number;
+  production_url: string;
+  staging_url: string;
 };
 
 function mapRun(row: RunRow, results: CompareResult[]): RunRecord {
@@ -68,11 +75,7 @@ function buildFailedCompareResult(pair: UrlPair, message: string): CompareResult
 async function updateRun(id: string, patch: Partial<RunRow>) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabaseAdmin = getSupabaseAdmin() as any;
-  const { error } = await supabaseAdmin
-    .from("qa_runs")
-    .update(patch)
-    .eq("id", id);
-
+  const { error } = await supabaseAdmin.from("qa_runs").update(patch).eq("id", id);
   if (error) {
     throw new Error(`Failed to update run ${id}: ${error.message}`);
   }
@@ -81,16 +84,10 @@ async function updateRun(id: string, patch: Partial<RunRow>) {
 async function getRunRowById(id: string): Promise<RunRow | null> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabaseAdmin = getSupabaseAdmin() as any;
-  const { data, error } = await supabaseAdmin
-    .from("qa_runs")
-    .select("*")
-    .eq("id", id)
-    .single();
-
+  const { data, error } = await supabaseAdmin.from("qa_runs").select("*").eq("id", id).single();
   if (error || !data) {
     return null;
   }
-
   return data as RunRow;
 }
 
@@ -104,11 +101,33 @@ async function appendResult(id: string, index: number, result: CompareResult) {
   });
 
   if (error) {
+    const details = `${error.code ?? ""} ${error.message ?? ""}`;
+    if (details.includes("duplicate") || details.includes("23505")) {
+      return;
+    }
     throw new Error(`Failed to append run result: ${error.message}`);
   }
 }
 
-async function getActiveRunsCountByUser(userId: string): Promise<number> {
+async function getRunningRunsByUser(userId: string, limit: number): Promise<RunRow[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabaseAdmin = getSupabaseAdmin() as any;
+  const { data, error } = await supabaseAdmin
+    .from("qa_runs")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("status", "running")
+    .order("created_at", { ascending: true })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`Failed to read running runs: ${error.message}`);
+  }
+
+  return (data ?? []) as RunRow[];
+}
+
+async function getRunningRunsCountByUser(userId: string): Promise<number> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabaseAdmin = getSupabaseAdmin() as any;
   const { count, error } = await supabaseAdmin
@@ -118,7 +137,7 @@ async function getActiveRunsCountByUser(userId: string): Promise<number> {
     .eq("status", "running");
 
   if (error) {
-    throw new Error(`Failed to check active runs: ${error.message}`);
+    throw new Error(`Failed to check running runs: ${error.message}`);
   }
 
   return Number(count ?? 0);
@@ -154,14 +173,113 @@ async function claimRunForProcessing(id: string): Promise<boolean> {
     .limit(1);
 
   if (error) {
-    throw new Error(`Failed to claim queued run ${id}: ${error.message}`);
+    throw new Error(`Failed to claim run ${id}: ${error.message}`);
   }
 
   return Array.isArray(data) && data.length > 0;
 }
 
+async function readRunInputRow(runId: string, rowIndex: number): Promise<RunInputRow | null> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabaseAdmin = getSupabaseAdmin() as any;
+  const { data, error } = await supabaseAdmin
+    .from("qa_run_inputs")
+    .select("run_id,row_index,production_url,staging_url")
+    .eq("run_id", runId)
+    .eq("row_index", rowIndex)
+    .single();
+
+  if (error || !data) {
+    return null;
+  }
+
+  return data as RunInputRow;
+}
+
+function shouldWaitForRowPacing(run: RunRow) {
+  if (ROW_PACING_DELAY_MS <= 0 || run.completed === 0) {
+    return false;
+  }
+
+  const updatedAt = Date.parse(run.updated_at);
+  if (Number.isNaN(updatedAt)) {
+    return false;
+  }
+
+  return Date.now() - updatedAt < ROW_PACING_DELAY_MS;
+}
+
+async function processRunTick(run: RunRow) {
+  let latest = await getRunRowById(run.id);
+  if (!latest) {
+    return;
+  }
+
+  if (latest.status === "canceled" || latest.status === "completed" || latest.status === "failed") {
+    return;
+  }
+
+  let remaining = PROCESS_ROWS_PER_TICK;
+  while (remaining > 0) {
+    latest = await getRunRowById(run.id);
+    if (!latest) {
+      return;
+    }
+
+    if (latest.status === "canceled" || latest.status === "failed") {
+      return;
+    }
+
+    if (latest.completed >= latest.total) {
+      await updateRun(latest.id, {
+        status: latest.errors.length > 0 ? "failed" : "completed",
+      });
+      return;
+    }
+
+    if (shouldWaitForRowPacing(latest)) {
+      return;
+    }
+
+    const row = await readRunInputRow(latest.id, latest.completed);
+    if (!row) {
+      const nextErrors = [...latest.errors, `Missing input row at index ${latest.completed}`];
+      await updateRun(latest.id, { status: "failed", errors: nextErrors });
+      return;
+    }
+
+    const pair: UrlPair = {
+      productionUrl: row.production_url,
+      stagingUrl: row.staging_url,
+    };
+
+    let result: CompareResult;
+    const nextErrors = [...latest.errors];
+    try {
+      result = await comparePair(pair);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown compare error";
+      nextErrors.push(`${pair.productionUrl} -> ${pair.stagingUrl}: ${message}`);
+      result = buildFailedCompareResult(pair, message);
+    }
+
+    await appendResult(latest.id, latest.completed, result);
+
+    const completed = latest.completed + 1;
+    const progress = Math.round((completed / latest.total) * 100);
+    await updateRun(latest.id, {
+      completed,
+      progress,
+      errors: nextErrors,
+      status: completed >= latest.total ? (nextErrors.length > 0 ? "failed" : "completed") : "running",
+    });
+
+    remaining -= 1;
+  }
+}
+
 async function tryStartQueuedRuns(userId: string) {
-  const runningCount = await getActiveRunsCountByUser(userId);
+  const runningCount = await getRunningRunsCountByUser(userId);
   const availableSlots = Math.max(0, MAX_RUNNING_RUNS_PER_USER - runningCount);
   if (availableSlots === 0) {
     return;
@@ -169,12 +287,14 @@ async function tryStartQueuedRuns(userId: string) {
 
   const queuedRunIds = await getQueuedRunIdsByUser(userId, availableSlots);
   for (const runId of queuedRunIds) {
-    const pairs = pendingRunPairs.get(runId);
-    if (!pairs) {
-      continue;
-    }
-    void processRun(runId, pairs, userId);
+    await claimRunForProcessing(runId);
   }
+}
+
+async function dispatchUserRuns(userId: string) {
+  await tryStartQueuedRuns(userId);
+  const runningRuns = await getRunningRunsByUser(userId, MAX_RUNNING_RUNS_PER_USER);
+  await Promise.all(runningRuns.map((run) => processRunTick(run)));
 }
 
 export async function createRun(userId: string, pairs: UrlPair[]): Promise<RunRecord> {
@@ -200,84 +320,20 @@ export async function createRun(userId: string, pairs: UrlPair[]): Promise<RunRe
     throw new Error(`Failed to create run: ${error?.message ?? "Unknown error"}`);
   }
 
-  const runRow = data as RunRow;
-  pendingRunPairs.set(runRow.id, pairs);
-  void tryStartQueuedRuns(userId);
-  return mapRun(runRow, []);
-}
+  const inputRows = pairs.map((pair, rowIndex) => ({
+    run_id: id,
+    row_index: rowIndex,
+    production_url: pair.productionUrl,
+    staging_url: pair.stagingUrl,
+  }));
 
-async function processRun(id: string, pairs: UrlPair[], userId: string) {
-  const errors: string[] = [];
-
-  try {
-    const claimed = await claimRunForProcessing(id);
-    if (!claimed) {
-      return;
-    }
-
-    const initialRun = await getRunRowById(id);
-    if (!initialRun || initialRun.status === "canceled") {
-      return;
-    }
-
-    for (let index = 0; index < pairs.length; index += 1) {
-      const latestRun = await getRunRowById(id);
-      if (!latestRun || latestRun.status === "canceled") {
-        return;
-      }
-
-      const pair = pairs[index];
-      let result: CompareResult;
-
-      try {
-        result = await comparePair(pair);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown compare error";
-        errors.push(`${pair.productionUrl} -> ${pair.stagingUrl}: ${message}`);
-        result = buildFailedCompareResult(pair, message);
-      }
-
-      await appendResult(id, index, result);
-
-      const completed = index + 1;
-      const progress = Math.round((completed / pairs.length) * 100);
-      await updateRun(id, {
-        completed,
-        progress,
-        errors,
-      });
-    }
-
-    const completedRun = await getRunRowById(id);
-    if (!completedRun || completedRun.status === "canceled") {
-      return;
-    }
-
-    await updateRun(id, {
-      status: errors.length > 0 ? "failed" : "completed",
-      errors,
-    });
-  } catch (error) {
-    const currentRun = await getRunRowById(id);
-    if (!currentRun || currentRun.status === "canceled") {
-      return;
-    }
-
-    const message = error instanceof Error ? error.message : "Unexpected run failure";
-    const nextErrors = [...errors, message];
-
-    try {
-      await updateRun(id, {
-        status: "failed",
-        errors: nextErrors,
-      });
-    } catch {
-      // no-op: avoid throwing in detached background task
-    }
-  } finally {
-    pendingRunPairs.delete(id);
-    await tryStartQueuedRuns(userId);
+  const { error: inputError } = await supabaseAdmin.from("qa_run_inputs").insert(inputRows);
+  if (inputError) {
+    throw new Error(`Failed to store run inputs: ${inputError.message}`);
   }
+
+  void dispatchUserRuns(userId);
+  return mapRun(data as RunRow, []);
 }
 
 export async function cancelRun(userId: string, id: string) {
@@ -298,6 +354,7 @@ export async function cancelRun(userId: string, id: string) {
     errors: nextErrors,
   });
 
+  await dispatchUserRuns(userId);
   const updated = await getRunRowById(id);
   if (!updated) {
     return null;
@@ -319,6 +376,14 @@ export async function getRunById(id: string) {
     return null;
   }
 
+  const typedRun = run as RunRow;
+  await dispatchUserRuns(typedRun.user_id);
+
+  const refreshedRun = await getRunRowById(typedRun.id);
+  if (!refreshedRun) {
+    return null;
+  }
+
   const { data: rows, error: resultsError } = await supabaseAdmin
     .from("qa_run_results")
     .select("row_index,result")
@@ -329,10 +394,12 @@ export async function getRunById(id: string) {
     throw new Error(`Failed to fetch run results: ${resultsError.message}`);
   }
 
-  return mapRun(run as RunRow, ((rows ?? []) as RunResultRow[]).map((row) => row.result));
+  return mapRun(refreshedRun, ((rows ?? []) as RunResultRow[]).map((row) => row.result));
 }
 
 export async function getRunsByUser(userId: string) {
+  await dispatchUserRuns(userId);
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabaseAdmin = getSupabaseAdmin() as any;
   const { data: runs, error } = await supabaseAdmin

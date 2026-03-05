@@ -1,8 +1,7 @@
 import axios from "axios";
 import { load } from "cheerio";
+import { REQUEST_TIMEOUT_MS } from "@/lib/runtime-config";
 import { normalizeMetaText } from "@/lib/url";
-
-const REQUEST_TIMEOUT_MS = 10_000;
 
 type PageData = {
   requestedUrl: string;

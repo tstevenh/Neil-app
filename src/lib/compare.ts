@@ -1,12 +1,11 @@
 import axios from "axios";
 import { load } from "cheerio";
 import { fetchPage } from "@/lib/fetch-page";
+import { MAX_LINKS_PER_PAGE, REQUEST_TIMEOUT_MS } from "@/lib/runtime-config";
 import { assertSafePublicUrl } from "@/lib/security";
 import { normalizeDedupeLink, normalizeMetaText, normalizeSlug, resolveHref } from "@/lib/url";
 import type { BadLink, CompareResult, UrlPair } from "@/lib/types";
 
-const MAX_LINKS_PER_PAGE = 200;
-const REQUEST_TIMEOUT_MS = 10_000;
 const BLOCKED_RETRIES = 2;
 const BLOCKED_RETRY_DELAY_MS = 1200;
 
