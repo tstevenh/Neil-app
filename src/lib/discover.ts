@@ -15,6 +15,15 @@ import { resolveHref } from "@/lib/url";
 const NON_HTML_EXTENSION_RE = /\.(?:pdf|jpe?g|png|gif|webp|svg|ico|bmp|tiff|mp4|mp3|wav|zip|rar|7z|gz|tar|xml|json|txt|css|js)$/i;
 const APIFY_DEFAULT_ACTOR = "apify/website-content-crawler";
 const APIFY_DATASET_PAGE_SIZE = 100;
+const EXCLUDED_DISCOVERY_PATH_PATTERNS = [
+  /^\/cdn-cgi(?:\/|$)/i,
+  /^\/wp-json(?:\/|$)/i,
+  /^\/wp-admin(?:\/|$)/i,
+  /^\/wp-login\.php$/i,
+  /^\/wp-cron\.php$/i,
+  /^\/xmlrpc\.php$/i,
+  /^\/(?:.+\/)?feed\/?$/i,
+];
 
 type SideKey = "production" | "staging";
 type SideProvider = "apify" | "playwright" | "done";
@@ -139,6 +148,10 @@ function toAbsolutePathUrl(origin: string, normalizedPath: string): string {
 
 function isTerminalFilePath(pathname: string): boolean {
   return NON_HTML_EXTENSION_RE.test(pathname);
+}
+
+function isExcludedDiscoveryPath(pathname: string) {
+  return EXCLUDED_DISCOVERY_PATH_PATTERNS.some((pattern) => pattern.test(pathname));
 }
 
 function getApifyConfig() {
@@ -481,6 +494,9 @@ async function pollApifySide(state: DiscoveryJobState, side: SideKey) {
             continue;
           }
           const pathKey = normalizedPath;
+          if (isExcludedDiscoveryPath(pathKey)) {
+            continue;
+          }
           updatePathForSide(state, side, pathKey);
         } catch {
           // Ignore malformed URLs from dataset rows.
@@ -566,6 +582,9 @@ async function processPlaywrightSideTick(state: DiscoveryJobState, side: SideKey
     if (isTerminalFilePath(currentPath)) {
       continue;
     }
+    if (isExcludedDiscoveryPath(currentPath)) {
+      continue;
+    }
 
     const targetUrl = toAbsolutePathUrl(info.origin, currentPath);
     try {
@@ -583,6 +602,9 @@ async function processPlaywrightSideTick(state: DiscoveryJobState, side: SideKey
       }
 
       const finalPath = normalizePathname(final.pathname);
+      if (isExcludedDiscoveryPath(finalPath)) {
+        continue;
+      }
       updatePathForSide(state, side, finalPath);
 
       const $ = load(page.html);
@@ -612,6 +634,9 @@ async function processPlaywrightSideTick(state: DiscoveryJobState, side: SideKey
         }
 
         const normalizedPath = normalizePathname(parsed.pathname);
+        if (isExcludedDiscoveryPath(normalizedPath)) {
+          continue;
+        }
         updatePathForSide(state, side, normalizedPath);
 
         if (

@@ -50,6 +50,25 @@ const DEFAULT_BROWSER_USER_AGENT =
   process.env.DEFAULT_BROWSER_USER_AGENT?.trim() ||
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
+type BrowserLike = {
+  newContext: (options?: {
+    userAgent?: string;
+    locale?: string;
+    extraHTTPHeaders?: Record<string, string>;
+  }) => Promise<{
+    newPage: () => Promise<{
+      goto: (
+        target: string,
+        options: { waitUntil: "domcontentloaded"; timeout: number },
+      ) => Promise<{ url: () => string } | null>;
+      content: () => Promise<string>;
+      url: () => string;
+    }>;
+    close: () => Promise<void>;
+  }>;
+  close: () => Promise<void>;
+};
+
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -205,27 +224,30 @@ async function tryApify(url: string, options: FetchPageOptions): Promise<PageDat
   }
 }
 
+function shouldUseServerlessPlaywright() {
+  return Boolean(process.env.VERCEL) || Boolean(process.env.AWS_EXECUTION_ENV) || process.env.NODE_ENV === "production";
+}
+
+async function launchFallbackBrowser(): Promise<BrowserLike> {
+  if (shouldUseServerlessPlaywright()) {
+    const [{ chromium: playwrightChromium }, chromium] = await Promise.all([
+      import("playwright-core"),
+      import("@sparticuz/chromium"),
+    ]);
+
+    return playwrightChromium.launch({
+      args: chromium.default.args,
+      executablePath: await chromium.default.executablePath(),
+      headless: true,
+    }) as Promise<BrowserLike>;
+  }
+
+  const playwright = await import("playwright");
+  return playwright.chromium.launch({ headless: true }) as Promise<BrowserLike>;
+}
+
 async function tryPlaywright(url: string, options: FetchPageOptions): Promise<PageData> {
-  let browser:
-    | {
-        newContext: (options?: {
-          userAgent?: string;
-          locale?: string;
-          extraHTTPHeaders?: Record<string, string>;
-        }) => Promise<{
-          newPage: () => Promise<{
-            goto: (
-              target: string,
-              options: { waitUntil: "domcontentloaded"; timeout: number },
-            ) => Promise<{ url: () => string } | null>;
-            content: () => Promise<string>;
-            url: () => string;
-          }>;
-          close: () => Promise<void>;
-        }>;
-        close: () => Promise<void>;
-      }
-    | null = null;
+  let browser: BrowserLike | null = null;
   let context:
     | {
         close: () => Promise<void>;
@@ -241,8 +263,7 @@ async function tryPlaywright(url: string, options: FetchPageOptions): Promise<Pa
     | null = null;
 
   try {
-    const playwright = await import("playwright");
-    browser = await playwright.chromium.launch({ headless: true });
+    browser = await launchFallbackBrowser();
     context = await browser.newContext({
       userAgent: DEFAULT_BROWSER_USER_AGENT,
       locale: "en-US",
