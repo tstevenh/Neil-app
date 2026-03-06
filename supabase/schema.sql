@@ -3,6 +3,7 @@
 create table if not exists public.qa_runs (
   id uuid primary key,
   user_id text not null,
+  run_mode text not null default 'standard' check (run_mode in ('standard', 'discover_stream')),
   status text not null check (status in ('queued', 'running', 'completed', 'failed', 'canceled')),
   progress integer not null default 0,
   total integer not null,
@@ -31,6 +32,14 @@ create table if not exists public.qa_run_inputs (
   unique (run_id, row_index)
 );
 
+create table if not exists public.qa_discovery_jobs (
+  run_id uuid primary key references public.qa_runs(id) on delete cascade,
+  state jsonb not null,
+  lock_version integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create index if not exists qa_runs_user_created_idx
   on public.qa_runs (user_id, created_at desc);
 
@@ -39,6 +48,9 @@ create index if not exists qa_run_results_run_idx
 
 create index if not exists qa_run_inputs_run_idx
   on public.qa_run_inputs (run_id, row_index);
+
+create index if not exists qa_discovery_jobs_updated_idx
+  on public.qa_discovery_jobs (updated_at desc);
 
 create or replace function public.set_updated_at()
 returns trigger as $$
@@ -51,4 +63,9 @@ $$ language plpgsql;
 drop trigger if exists qa_runs_set_updated_at on public.qa_runs;
 create trigger qa_runs_set_updated_at
 before update on public.qa_runs
+for each row execute function public.set_updated_at();
+
+drop trigger if exists qa_discovery_jobs_set_updated_at on public.qa_discovery_jobs;
+create trigger qa_discovery_jobs_set_updated_at
+before update on public.qa_discovery_jobs
 for each row execute function public.set_updated_at();

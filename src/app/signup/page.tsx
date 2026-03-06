@@ -22,7 +22,11 @@ export default function SignUpPage() {
   useEffect(() => {
     const bootstrap = async () => {
       const supabase = getSupabaseBrowser();
-      const { data } = await supabase.auth.getSession();
+      const { data, error } = await supabase.auth.getSession();
+      if (error) {
+        await supabase.auth.signOut();
+        return;
+      }
       if (data.session?.access_token) {
         router.replace("/");
       }

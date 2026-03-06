@@ -1,13 +1,15 @@
 import axios from "axios";
 import { load } from "cheerio";
 import { fetchPage } from "@/lib/fetch-page";
-import { MAX_LINKS_PER_PAGE, REQUEST_TIMEOUT_MS } from "@/lib/runtime-config";
+import {
+  BLOCKED_RETRY_COUNT,
+  BLOCKED_RETRY_DELAY_MS,
+  MAX_LINKS_PER_PAGE,
+  REQUEST_TIMEOUT_MS,
+} from "@/lib/runtime-config";
 import { assertSafePublicUrl } from "@/lib/security";
 import { normalizeDedupeLink, normalizeMetaText, normalizeSlug, resolveHref } from "@/lib/url";
 import type { BadLink, CompareResult, UrlPair } from "@/lib/types";
-
-const BLOCKED_RETRIES = 2;
-const BLOCKED_RETRY_DELAY_MS = 1200;
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -28,7 +30,7 @@ async function fetchWithBlockedRetry(url: string) {
   let attempts = 0;
   let lastPage = await fetchPage(url);
 
-  while (looksBlocked(lastPage.title, lastPage.html) && attempts < BLOCKED_RETRIES) {
+  while (looksBlocked(lastPage.title, lastPage.html) && attempts < BLOCKED_RETRY_COUNT) {
     attempts += 1;
     await delay(BLOCKED_RETRY_DELAY_MS);
     lastPage = await fetchPage(url);
@@ -55,6 +57,10 @@ function computeOverallStatus(input: {
     input.brokenLinksCount > 0 ||
     input.hashLinksCount > 0;
   return failed ? "FAIL" : "PASS";
+}
+
+function hasText(value: string) {
+  return value.trim().length > 0;
 }
 
 async function checkLink404(url: string): Promise<number> {
@@ -165,9 +171,22 @@ export async function comparePair(pair: UrlPair): Promise<CompareResult> {
   const prodDescription = normalizeMetaText(prodPage?.description);
   const stagingDescription = normalizeMetaText(stagingPage?.description);
 
-  const titleMatch = hasProduction && hasStaging && !prodBlocked && !stagingBlocked ? prodTitle === stagingTitle : false;
+  const titleMatch =
+    hasProduction &&
+    hasStaging &&
+    !prodBlocked &&
+    !stagingBlocked &&
+    hasText(prodTitle) &&
+    hasText(stagingTitle) &&
+    prodTitle === stagingTitle;
   const descriptionMatch =
-    hasProduction && hasStaging && !prodBlocked && !stagingBlocked ? prodDescription === stagingDescription : false;
+    hasProduction &&
+    hasStaging &&
+    !prodBlocked &&
+    !stagingBlocked &&
+    hasText(prodDescription) &&
+    hasText(stagingDescription) &&
+    prodDescription === stagingDescription;
   const prodSlug = prodPage ? normalizeSlug(prodPage.finalUrl) : "";
   const stagingSlug = stagingPage ? normalizeSlug(stagingPage.finalUrl) : "";
   const slugMatch = hasProduction && hasStaging && !prodBlocked && !stagingBlocked ? prodSlug === stagingSlug : false;
@@ -198,7 +217,12 @@ export async function comparePair(pair: UrlPair): Promise<CompareResult> {
   }
 
   if ((hasProduction || hasStaging) && (!prodTitle || !stagingTitle) && !prodBlocked && !stagingBlocked) {
-    warnings.push("Missing title on one or both pages");
+    if (!prodTitle) {
+      warnings.push("Missing production title");
+    }
+    if (!stagingTitle) {
+      warnings.push("Missing staging title");
+    }
   }
 
   if (
@@ -207,7 +231,12 @@ export async function comparePair(pair: UrlPair): Promise<CompareResult> {
     !prodBlocked &&
     !stagingBlocked
   ) {
-    warnings.push("Missing description on one or both pages");
+    if (!prodDescription) {
+      warnings.push("Missing production meta description");
+    }
+    if (!stagingDescription) {
+      warnings.push("Missing staging meta description");
+    }
   }
   if (hasProduction && prodBlocked) {
     warnings.push("Skipped production 404/# link checks because page is blocked");
@@ -215,6 +244,29 @@ export async function comparePair(pair: UrlPair): Promise<CompareResult> {
 
   const brokenLinksCount = linkAnalysis.brokenLinks.length;
   const hashLinksCount = linkAnalysis.hashLinks.length;
+
+  if (hasProduction && hasStaging && !prodBlocked && !stagingBlocked) {
+    if (!titleMatch) {
+      warnings.push(`Title mismatch (production: "${prodTitle || "Missing"}" | staging: "${stagingTitle || "Missing"}")`);
+    }
+    if (!descriptionMatch) {
+      warnings.push(
+        `Meta description mismatch (production: "${prodDescription || "Missing"}" | staging: "${stagingDescription || "Missing"}")`,
+      );
+    }
+    if (!slugMatch) {
+      warnings.push(`URL slug mismatch (production: "${prodSlug || "Missing"}" | staging: "${stagingSlug || "Missing"}")`);
+    }
+  }
+
+  if (brokenLinksCount > 0) {
+    const list = linkAnalysis.brokenLinks.slice(0, 10).map((item) => item.url).join(" | ");
+    warnings.push(`404 links found: ${brokenLinksCount}${list ? ` | ${list}` : ""}`);
+  }
+  if (hashLinksCount > 0) {
+    const list = linkAnalysis.hashLinks.slice(0, 15).join(" | ");
+    warnings.push(`# links found: ${hashLinksCount}${list ? ` | ${list}` : ""}`);
+  }
 
   return {
     productionUrl: pair.productionUrl,

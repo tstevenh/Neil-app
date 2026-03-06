@@ -1,14 +1,25 @@
 import { randomUUID } from "node:crypto";
+import {
+  createDiscoveryJobState,
+  getDiscoveryDiagnostics,
+  getNextPendingComparison,
+  isDiscoveryComplete,
+  markComparisonProcessed,
+  runDiscoveryTick,
+  summarizeDiscoveryState,
+} from "@/lib/discover";
 import type { CompareResult, RunRecord, RunStatus, UrlPair } from "@/lib/types";
 import { comparePair } from "@/lib/compare";
 import { MAX_RUNNING_RUNS_PER_USER, ROW_PACING_DELAY_MS } from "@/lib/runtime-config";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 const PROCESS_ROWS_PER_TICK = 1;
+type RunMode = "standard" | "discover_stream";
 
 type RunRow = {
   id: string;
   user_id: string;
+  run_mode?: RunMode;
   status: RunStatus;
   progress: number;
   total: number;
@@ -30,10 +41,21 @@ type RunInputRow = {
   staging_url: string;
 };
 
-function mapRun(row: RunRow, results: CompareResult[]): RunRecord {
+type DiscoveryJobRow = {
+  run_id: string;
+  state: unknown;
+  lock_version: number;
+};
+
+function mapRun(
+  row: RunRow,
+  results: CompareResult[],
+  discoveryDiagnostics?: RunRecord["discoveryDiagnostics"],
+): RunRecord {
   return {
     id: row.id,
     userId: row.user_id,
+    runMode: getRunMode(row),
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -42,6 +64,7 @@ function mapRun(row: RunRow, results: CompareResult[]): RunRecord {
     completed: row.completed,
     results,
     errors: Array.isArray(row.errors) ? row.errors : [],
+    discoveryDiagnostics,
   };
 }
 
@@ -122,6 +145,27 @@ async function appendResult(id: string, index: number, result: CompareResult) {
       return;
     }
     throw new Error(`Failed to append run result: ${error.message}`);
+  }
+}
+
+async function upsertResult(id: string, index: number, result: CompareResult) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabaseAdmin = getSupabaseAdmin() as any;
+  const { error } = await supabaseAdmin
+    .from("qa_run_results")
+    .upsert(
+      {
+        run_id: id,
+        row_index: index,
+        result,
+      },
+      {
+        onConflict: "run_id,row_index",
+      },
+    );
+
+  if (error) {
+    throw new Error(`Failed to upsert run result: ${error.message}`);
   }
 }
 
@@ -212,6 +256,61 @@ async function readRunInputRow(runId: string, rowIndex: number): Promise<RunInpu
   return data as RunInputRow;
 }
 
+async function readDiscoveryJob(runId: string): Promise<DiscoveryJobRow | null> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabaseAdmin = getSupabaseAdmin() as any;
+  const { data, error } = await supabaseAdmin
+    .from("qa_discovery_jobs")
+    .select("run_id,state,lock_version")
+    .eq("run_id", runId)
+    .single();
+
+  if (error || !data) {
+    return null;
+  }
+
+  return data as DiscoveryJobRow;
+}
+
+async function insertDiscoveryJob(runId: string, state: unknown) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabaseAdmin = getSupabaseAdmin() as any;
+  const { error } = await supabaseAdmin.from("qa_discovery_jobs").insert({
+    run_id: runId,
+    state,
+    lock_version: 0,
+  });
+
+  if (error) {
+    throw new Error(`Failed to create discovery job: ${error.message}`);
+  }
+}
+
+async function saveDiscoveryJobWithVersion(runId: string, expectedVersion: number, state: unknown): Promise<boolean> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabaseAdmin = getSupabaseAdmin() as any;
+  const { data, error } = await supabaseAdmin
+    .from("qa_discovery_jobs")
+    .update({
+      state,
+      lock_version: expectedVersion + 1,
+    })
+    .eq("run_id", runId)
+    .eq("lock_version", expectedVersion)
+    .select("run_id")
+    .limit(1);
+
+  if (error) {
+    throw new Error(`Failed to save discovery job: ${error.message}`);
+  }
+
+  return Array.isArray(data) && data.length > 0;
+}
+
+function getRunMode(run: RunRow): RunMode {
+  return run.run_mode === "discover_stream" ? "discover_stream" : "standard";
+}
+
 function shouldWaitForRowPacing(run: RunRow) {
   if (ROW_PACING_DELAY_MS <= 0 || run.completed === 0) {
     return false;
@@ -225,7 +324,7 @@ function shouldWaitForRowPacing(run: RunRow) {
   return Date.now() - updatedAt < ROW_PACING_DELAY_MS;
 }
 
-async function processRunTick(run: RunRow) {
+async function processStandardRunTick(run: RunRow) {
   let latest = await getRunRowById(run.id);
   if (!latest) {
     return;
@@ -281,6 +380,11 @@ async function processRunTick(run: RunRow) {
 
     await appendResult(latest.id, latest.completed, result);
 
+    const beforeUpdate = await getRunRowById(latest.id);
+    if (!beforeUpdate || beforeUpdate.status === "canceled" || beforeUpdate.status === "failed") {
+      return;
+    }
+
     const completed = latest.completed + 1;
     const progress = Math.round((completed / latest.total) * 100);
     await updateRun(latest.id, {
@@ -292,6 +396,89 @@ async function processRunTick(run: RunRow) {
 
     remaining -= 1;
   }
+}
+
+async function processDiscoveryRunTick(run: RunRow) {
+  const latest = await getRunRowById(run.id);
+  if (!latest) {
+    return;
+  }
+
+  if (latest.status === "canceled" || latest.status === "completed" || latest.status === "failed") {
+    return;
+  }
+
+  if (shouldWaitForRowPacing(latest)) {
+    return;
+  }
+
+  const discoveryJob = await readDiscoveryJob(run.id);
+  if (!discoveryJob) {
+    const nextErrors = [...latest.errors, "Missing discovery job state"];
+    await updateRun(latest.id, { status: "failed", errors: nextErrors });
+    return;
+  }
+
+  // Discovery state is persisted as JSON in Supabase.
+  const state = discoveryJob.state as ReturnType<typeof createDiscoveryJobState>;
+  const nextErrors = [...latest.errors];
+
+  try {
+    await runDiscoveryTick(state);
+  } catch (error) {
+    nextErrors.push(`Discovery tick failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+  }
+
+  const pending = getNextPendingComparison(state);
+  if (pending) {
+    let result: CompareResult;
+    try {
+      result = await comparePair(pending.pair);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown compare error";
+      nextErrors.push(`${pending.pair.productionUrl} -> ${pending.pair.stagingUrl}: ${message}`);
+      result = buildFailedCompareResult(pending.pair, message);
+    }
+
+    await upsertResult(latest.id, pending.rowIndex, result);
+    markComparisonProcessed(state, pending.rowIndex);
+  }
+
+  const summary = summarizeDiscoveryState(state);
+  const done = isDiscoveryComplete(state) && summary.pending === 0;
+  const progress = summary.total > 0 ? Math.round((summary.completed / summary.total) * 100) : 0;
+
+  const beforeSave = await getRunRowById(latest.id);
+  if (!beforeSave || beforeSave.status === "canceled" || beforeSave.status === "failed") {
+    return;
+  }
+
+  const saved = await saveDiscoveryJobWithVersion(latest.id, discoveryJob.lock_version, state);
+  if (!saved) {
+    return;
+  }
+
+  const beforeUpdate = await getRunRowById(latest.id);
+  if (!beforeUpdate || beforeUpdate.status === "canceled" || beforeUpdate.status === "failed") {
+    return;
+  }
+
+  await updateRun(latest.id, {
+    total: Math.max(summary.total, 1),
+    completed: summary.completed,
+    progress,
+    errors: nextErrors,
+    status: done ? (nextErrors.length > 0 ? "failed" : "completed") : "running",
+  });
+}
+
+async function processRunTick(run: RunRow) {
+  if (getRunMode(run) === "discover_stream") {
+    await processDiscoveryRunTick(run);
+    return;
+  }
+
+  await processStandardRunTick(run);
 }
 
 async function tryStartQueuedRuns(userId: string) {
@@ -323,6 +510,7 @@ export async function createRun(userId: string, pairs: UrlPair[]): Promise<RunRe
     .insert({
       id,
       user_id: userId,
+      run_mode: "standard",
       status: "queued",
       progress: 0,
       total: pairs.length,
@@ -348,6 +536,53 @@ export async function createRun(userId: string, pairs: UrlPair[]): Promise<RunRe
     throw new Error(`Failed to store run inputs: ${inputError.message}`);
   }
 
+  void dispatchUserRuns(userId);
+  return mapRun(data as RunRow, []);
+}
+
+export async function createDiscoveryRun(
+  userId: string,
+  input: {
+    productionRootUrl: string;
+    stagingRootUrl: string;
+    productionCookieHeader?: string;
+    stagingCookieHeader?: string;
+    useApifyProxy?: boolean;
+  },
+): Promise<RunRecord> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabaseAdmin = getSupabaseAdmin() as any;
+  const id = randomUUID();
+
+  const initialState = createDiscoveryJobState({
+    productionRootUrl: input.productionRootUrl,
+    stagingRootUrl: input.stagingRootUrl,
+    productionCookieHeader: input.productionCookieHeader,
+    stagingCookieHeader: input.stagingCookieHeader,
+    useApifyProxy: input.useApifyProxy,
+  });
+  const initialSummary = summarizeDiscoveryState(initialState);
+
+  const { data, error } = await supabaseAdmin
+    .from("qa_runs")
+    .insert({
+      id,
+      user_id: userId,
+      run_mode: "discover_stream",
+      status: "queued",
+      progress: 0,
+      total: Math.max(initialSummary.total, 1),
+      completed: 0,
+      errors: [],
+    })
+    .select("*")
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Failed to create discovery run: ${error?.message ?? "Unknown error"}`);
+  }
+
+  await insertDiscoveryJob(id, initialState);
   void dispatchUserRuns(userId);
   return mapRun(data as RunRow, []);
 }
@@ -421,7 +656,18 @@ export async function getRunById(id: string) {
     return null;
   }
 
-  return mapRun(refreshedRun, await getRunResults(id));
+  const results = await getRunResults(id);
+  let discoveryDiagnostics: RunRecord["discoveryDiagnostics"] | undefined;
+  if (getRunMode(refreshedRun) === "discover_stream") {
+    const discoveryJob = await readDiscoveryJob(refreshedRun.id);
+    if (discoveryJob?.state && typeof discoveryJob.state === "object") {
+      discoveryDiagnostics = getDiscoveryDiagnostics(
+        discoveryJob.state as ReturnType<typeof createDiscoveryJobState>,
+      );
+    }
+  }
+
+  return mapRun(refreshedRun, results, discoveryDiagnostics);
 }
 
 export async function getRunsByUser(userId: string) {

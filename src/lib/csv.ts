@@ -94,6 +94,9 @@ export function buildResultsCsv(results: CompareResult[]): string {
     ) {
       notes.push("Meta description mismatch");
     }
+    if (!item.slugMatch && clean(item.productionUrl) && clean(item.stagingUrl) && !productionBlocked && !stagingBlocked) {
+      notes.push("URL slug mismatch");
+    }
     if (!clean(item.prodTitle) && !productionBlocked) {
       notes.push("Missing production title");
     }

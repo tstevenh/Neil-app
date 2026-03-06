@@ -40,6 +40,7 @@ export type UrlPair = {
 export type RunRecord = {
   id: string;
   userId: string;
+  runMode?: "standard" | "discover_stream";
   status: RunStatus;
   createdAt: string;
   updatedAt: string;
@@ -48,4 +49,28 @@ export type RunRecord = {
   completed: number;
   results: CompareResult[];
   errors: string[];
+  discoveryDiagnostics?: {
+    warnings: string[];
+    pendingComparisons: number;
+    totalPaths: number;
+    useApifyProxy: boolean;
+    production: {
+      provider: string;
+      discoveredPaths: number;
+      allowedHosts: string[];
+      queueSize: number;
+      visitedCount: number;
+      apifyRunId: string;
+      apifyDatasetId: string;
+    };
+    staging: {
+      provider: string;
+      discoveredPaths: number;
+      allowedHosts: string[];
+      queueSize: number;
+      visitedCount: number;
+      apifyRunId: string;
+      apifyDatasetId: string;
+    };
+  };
 };

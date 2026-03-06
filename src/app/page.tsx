@@ -15,6 +15,12 @@ export default function Home() {
 
   const [productionUrl, setProductionUrl] = useState("");
   const [stagingUrl, setStagingUrl] = useState("");
+  const [discoverProductionRootUrl, setDiscoverProductionRootUrl] = useState("");
+  const [discoverStagingRootUrl, setDiscoverStagingRootUrl] = useState("");
+  const [discoverProductionCookieHeader, setDiscoverProductionCookieHeader] = useState("");
+  const [discoverStagingCookieHeader, setDiscoverStagingCookieHeader] = useState("");
+  const [discoverUseApifyProxy, setDiscoverUseApifyProxy] = useState(true);
+  const [isStartingDiscover, setIsStartingDiscover] = useState(false);
   const [bulkFile, setBulkFile] = useState<File | null>(null);
   const [message, setMessage] = useState("");
   const [runs, setRuns] = useState<RunRecord[]>([]);
@@ -27,7 +33,12 @@ export default function Home() {
 
   async function getCurrentAccessToken() {
     const supabase = getSupabaseBrowser();
-    const { data } = await supabase.auth.getSession();
+    const { data, error } = await supabase.auth.getSession();
+    if (error) {
+      await supabase.auth.signOut();
+      setToken(null);
+      return null;
+    }
     const currentToken = data.session?.access_token ?? null;
     setToken(currentToken);
     return currentToken;
@@ -53,7 +64,13 @@ export default function Home() {
 
     if (response.status === 401) {
       const supabase = getSupabaseBrowser();
-      const { data } = await supabase.auth.refreshSession();
+      const { data, error } = await supabase.auth.refreshSession();
+      if (error) {
+        await supabase.auth.signOut();
+        setToken(null);
+        router.replace("/signin");
+        throw new Error("Session expired. Please sign in again.");
+      }
       const refreshedToken = data.session?.access_token ?? null;
       setToken(refreshedToken);
 
@@ -205,6 +222,52 @@ export default function Home() {
     }
   }
 
+  async function startDiscoverCompare() {
+    setMessage("");
+    setIsStartingDiscover(true);
+    try {
+      const response = await apiFetch("/api/compare/discover", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          productionRootUrl: discoverProductionRootUrl,
+          stagingRootUrl: discoverStagingRootUrl,
+          productionCookieHeader: discoverProductionCookieHeader,
+          stagingCookieHeader: discoverStagingCookieHeader,
+          useApifyProxy: discoverUseApifyProxy,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        setMessage(data.error ?? "Failed to start homepage crawl compare");
+        return;
+      }
+
+      let sourceLabel = "Homepage Crawl";
+      try {
+        const prodHost = new URL(discoverProductionRootUrl).hostname;
+        sourceLabel = `Homepage Crawl - ${prodHost}`;
+      } catch {
+        // Use fallback label when URL parsing fails unexpectedly.
+      }
+
+      saveRunLabel(data.runId, sourceLabel);
+      void refreshRuns();
+
+      const warningCount = Array.isArray(data.discoverWarnings) ? data.discoverWarnings.length : 0;
+      const rowCount = typeof data.total === "number" ? data.total : 0;
+      const warningText = warningCount > 0 ? ` | Discovery warnings: ${warningCount}` : "";
+      setMessage(`Homepage crawl run started: ${data.runId} | Rows: ${rowCount}${warningText}`);
+    } catch {
+      setMessage("Network error: unable to start homepage crawl compare.");
+    } finally {
+      setIsStartingDiscover(false);
+    }
+  }
+
   async function downloadCsv(runId: string) {
     const sourceName = runSourceLabels[runId];
     const normalizedBase = (sourceName || "")
@@ -293,7 +356,12 @@ export default function Home() {
         }
 
         const supabase = getSupabaseBrowser();
-        const { data } = await supabase.auth.getSession();
+        const { data, error } = await supabase.auth.getSession();
+        if (error) {
+          await supabase.auth.signOut();
+          setToken(null);
+          return;
+        }
         setToken(data.session?.access_token ?? null);
 
         const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -418,7 +486,9 @@ export default function Home() {
         <section className={`grid gap-3 p-4 md:grid-cols-5 ${cardClass}`}>
           <div className="rounded-2xl border border-[#d8ebef] bg-[#e3faff] p-4 md:col-span-2">
             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#234167]">Step 1</p>
-            <p className="mt-1 text-sm font-medium text-[#101828]">Add one URL pair or upload CSV.</p>
+            <p className="mt-1 text-sm font-medium text-[#101828]">
+              Add one URL pair, upload CSV, or run homepage crawl compare.
+            </p>
           </div>
           <div className="rounded-2xl border border-[#d8ebef] bg-white p-4">
             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#234167]">Step 2</p>
@@ -437,7 +507,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className={`grid min-w-0 gap-4 p-6 md:grid-cols-2 ${cardClass}`}>
+        <section className={`grid min-w-0 gap-4 p-6 md:grid-cols-3 ${cardClass}`}>
           <div className="min-w-0 space-y-3 rounded-2xl border border-[#deedf1] bg-white p-4">
             <h2 className="text-xl font-medium text-[#101828]">Single Compare</h2>
             <input
@@ -470,6 +540,53 @@ export default function Home() {
             />
             <button type="button" className={primaryButtonClass} onClick={startBulkCompare}>
               Run Bulk Check
+            </button>
+          </div>
+
+          <div className="min-w-0 space-y-3 rounded-2xl border border-[#deedf1] bg-white p-4">
+            <h2 className="text-xl font-medium text-[#101828]">Homepage Crawl Compare</h2>
+            <p className="text-xs text-[#5a6a74]">
+              Crawl recursively (cap 300/site, exact domain, ignore query params) and compare by route path.
+            </p>
+            <input
+              className="w-full rounded-xl border border-[#d2e6ea] bg-white px-4 py-2.5 text-sm outline-none transition focus:border-[#6cc8dd]"
+              placeholder="Production Homepage URL"
+              value={discoverProductionRootUrl}
+              onChange={(event) => setDiscoverProductionRootUrl(event.target.value)}
+            />
+            <input
+              className="w-full rounded-xl border border-[#d2e6ea] bg-white px-4 py-2.5 text-sm outline-none transition focus:border-[#6cc8dd]"
+              placeholder="Staging Homepage URL"
+              value={discoverStagingRootUrl}
+              onChange={(event) => setDiscoverStagingRootUrl(event.target.value)}
+            />
+            <textarea
+              className="min-h-24 w-full rounded-xl border border-[#d2e6ea] bg-white px-4 py-2.5 text-sm outline-none transition focus:border-[#6cc8dd]"
+              placeholder="Optional production Cookie header (for public pages with session/consent/bot gating)"
+              value={discoverProductionCookieHeader}
+              onChange={(event) => setDiscoverProductionCookieHeader(event.target.value)}
+            />
+            <textarea
+              className="min-h-24 w-full rounded-xl border border-[#d2e6ea] bg-white px-4 py-2.5 text-sm outline-none transition focus:border-[#6cc8dd]"
+              placeholder="Optional staging Cookie header (for logged-in/private pages)"
+              value={discoverStagingCookieHeader}
+              onChange={(event) => setDiscoverStagingCookieHeader(event.target.value)}
+            />
+            <label className="flex items-center gap-2 text-xs text-[#5a6a74]">
+              <input
+                type="checkbox"
+                checked={discoverUseApifyProxy}
+                onChange={(event) => setDiscoverUseApifyProxy(event.target.checked)}
+              />
+              Use Apify proxy (can reduce blocks on some sites, usually costs more)
+            </label>
+            <button
+              type="button"
+              className={primaryButtonClass}
+              disabled={isStartingDiscover}
+              onClick={startDiscoverCompare}
+            >
+              {isStartingDiscover ? "Discovering..." : "Run Homepage Crawl"}
             </button>
           </div>
         </section>
@@ -596,6 +713,44 @@ export default function Home() {
                       {selectedRunSummary?.blockedCount ?? 0}
                     </span>
                   </p>
+                  {selectedRun.discoveryDiagnostics ? (
+                    <div className="mt-2 rounded-xl border border-[#deedf1] bg-[#f7fcfd] p-3 text-xs text-[#234167]">
+                      <p className="font-semibold text-[#101828]">Discovery Diagnostics</p>
+                      <p className="mt-1">
+                        Total paths: {selectedRun.discoveryDiagnostics.totalPaths} | Pending compares:{" "}
+                        {selectedRun.discoveryDiagnostics.pendingComparisons}
+                      </p>
+                      <p className="mt-1">
+                        Apify proxy: {selectedRun.discoveryDiagnostics.useApifyProxy ? "On" : "Off"}
+                      </p>
+                      <div className="mt-2 grid gap-2 md:grid-cols-2">
+                        <div className="rounded-lg border border-[#d7e8ed] bg-white p-2">
+                          <p className="font-semibold text-[#101828]">Production</p>
+                          <p>Provider: {selectedRun.discoveryDiagnostics.production.provider}</p>
+                          <p>Discovered paths: {selectedRun.discoveryDiagnostics.production.discoveredPaths}</p>
+                          <p>Allowed hosts: {selectedRun.discoveryDiagnostics.production.allowedHosts.join(", ")}</p>
+                        </div>
+                        <div className="rounded-lg border border-[#d7e8ed] bg-white p-2">
+                          <p className="font-semibold text-[#101828]">Staging</p>
+                          <p>Provider: {selectedRun.discoveryDiagnostics.staging.provider}</p>
+                          <p>Discovered paths: {selectedRun.discoveryDiagnostics.staging.discoveredPaths}</p>
+                          <p>Allowed hosts: {selectedRun.discoveryDiagnostics.staging.allowedHosts.join(", ")}</p>
+                        </div>
+                      </div>
+                      {selectedRun.discoveryDiagnostics.warnings.length > 0 ? (
+                        <div className="mt-2">
+                          <p className="font-semibold text-rose-700">Warnings</p>
+                          <ul className="list-disc pl-5">
+                            {selectedRun.discoveryDiagnostics.warnings.map((warning, index) => (
+                              <li key={`${warning}-${index}`}>{warning}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : (
+                        <p className="mt-2 text-emerald-700">No discovery warnings.</p>
+                      )}
+                    </div>
+                  ) : null}
                 </>
               ) : null}
             </div>
