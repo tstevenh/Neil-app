@@ -11,6 +11,12 @@ import { assertSafePublicUrl } from "@/lib/security";
 import { normalizeDedupeLink, normalizeMetaText, normalizeSlug, resolveHref } from "@/lib/url";
 import type { BadLink, CompareResult, UrlPair } from "@/lib/types";
 
+type ComparePairOptions = {
+  productionCookieHeader?: string;
+  stagingCookieHeader?: string;
+  useApifyProxy?: boolean;
+};
+
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -26,14 +32,25 @@ function looksBlocked(title: string, html: string) {
   );
 }
 
-async function fetchWithBlockedRetry(url: string) {
+async function fetchWithBlockedRetry(
+  url: string,
+  options: { cookieHeader?: string; useApifyProxy?: boolean },
+) {
   let attempts = 0;
-  let lastPage = await fetchPage(url);
+  let lastPage = await fetchPage(url, {
+    cookieHeader: options.cookieHeader,
+    strategy: "apify-first",
+    useApifyProxy: options.useApifyProxy,
+  });
 
   while (looksBlocked(lastPage.title, lastPage.html) && attempts < BLOCKED_RETRY_COUNT) {
     attempts += 1;
     await delay(BLOCKED_RETRY_DELAY_MS);
-    lastPage = await fetchPage(url);
+    lastPage = await fetchPage(url, {
+      cookieHeader: options.cookieHeader,
+      strategy: "apify-first",
+      useApifyProxy: options.useApifyProxy,
+    });
   }
 
   return {
@@ -144,7 +161,7 @@ async function analyzeProductionLinks(productionFinalUrl: string, html: string) 
   };
 }
 
-export async function comparePair(pair: UrlPair): Promise<CompareResult> {
+export async function comparePair(pair: UrlPair, options: ComparePairOptions = {}): Promise<CompareResult> {
   const hasProduction = Boolean(pair.productionUrl);
   const hasStaging = Boolean(pair.stagingUrl);
 
@@ -159,8 +176,18 @@ export async function comparePair(pair: UrlPair): Promise<CompareResult> {
     assertSafePublicUrl(pair.stagingUrl);
   }
 
-  const prodFetch = hasProduction ? await fetchWithBlockedRetry(pair.productionUrl) : null;
-  const stagingFetch = hasStaging ? await fetchWithBlockedRetry(pair.stagingUrl) : null;
+  const prodFetch = hasProduction
+    ? await fetchWithBlockedRetry(pair.productionUrl, {
+        cookieHeader: options.productionCookieHeader,
+        useApifyProxy: options.useApifyProxy,
+      })
+    : null;
+  const stagingFetch = hasStaging
+    ? await fetchWithBlockedRetry(pair.stagingUrl, {
+        cookieHeader: options.stagingCookieHeader,
+        useApifyProxy: options.useApifyProxy,
+      })
+    : null;
   const prodPage = prodFetch?.page ?? null;
   const stagingPage = stagingFetch?.page ?? null;
   const prodBlocked = Boolean(prodFetch?.blocked);

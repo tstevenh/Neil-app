@@ -433,7 +433,11 @@ async function processDiscoveryRunTick(run: RunRow) {
   if (pending) {
     let result: CompareResult;
     try {
-      result = await comparePair(pending.pair);
+      result = await comparePair(pending.pair, {
+        productionCookieHeader: state.production.cookieHeader,
+        stagingCookieHeader: state.staging.cookieHeader,
+        useApifyProxy: state.useApifyProxy,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown compare error";
       nextErrors.push(`${pending.pair.productionUrl} -> ${pending.pair.stagingUrl}: ${message}`);

@@ -208,6 +208,30 @@ function buildApifyHeaders(token: string) {
   };
 }
 
+function describeApifyError(error: unknown) {
+  if (axios.isAxiosError(error)) {
+    const status = error.response?.status;
+    if (status === 402) {
+      return "Apify billing limit reached. Top up credits or upgrade the Apify plan.";
+    }
+    if (status === 401) {
+      return "Apify authentication failed. Check APIFY_API_TOKEN.";
+    }
+    if (status === 403) {
+      return "Apify request was forbidden. Check actor access and token permissions.";
+    }
+    if (status === 429) {
+      return "Apify rate limit reached. Retry in a moment.";
+    }
+    if (status) {
+      return `Apify request failed with HTTP ${status}`;
+    }
+    return error.message || "Unknown Apify request error";
+  }
+
+  return error instanceof Error ? error.message : "Unknown Apify error";
+}
+
 function appendWarning(state: DiscoveryJobState, message: string) {
   if (!message.trim()) {
     return;
@@ -373,7 +397,7 @@ async function startApifyRunIfNeeded(state: DiscoveryJobState, side: SideKey) {
   } catch (error) {
     appendWarning(
       state,
-      `${side}: apify actor run failed (${error instanceof Error ? error.message : "Unknown error"})`,
+      `${side}: apify actor run failed (${describeApifyError(error)})`,
     );
     info.provider = "playwright";
     if (!info.queue.includes("/")) {
@@ -548,7 +572,10 @@ async function processPlaywrightSideTick(state: DiscoveryJobState, side: SideKey
       if (PLAYWRIGHT_DISCOVERY_DELAY_MS > 0) {
         await delay(PLAYWRIGHT_DISCOVERY_DELAY_MS);
       }
-      const page = await fetchPage(targetUrl, { cookieHeader: info.cookieHeader });
+      const page = await fetchPage(targetUrl, {
+        cookieHeader: info.cookieHeader,
+        strategy: "local-only",
+      });
       const final = new URL(page.finalUrl);
       maybeAddRedirectHostAlias(state, side, final.hostname);
       if (!isAllowedHost(info, final.hostname)) {

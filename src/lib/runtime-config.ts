@@ -96,3 +96,15 @@ export const APIFY_MAX_CONCURRENCY = parseIntEnv(process.env.DEFAULT_APIFY_MAX_C
 });
 
 export const APIFY_USE_PROXY = parseBooleanEnv(process.env.DEFAULT_APIFY_USE_PROXY, true);
+
+export const APIFY_COMPARE_FETCH_ENABLED = parseBooleanEnv(process.env.DEFAULT_APIFY_COMPARE_FETCH_ENABLED, true);
+
+export const APIFY_COMPARE_FALLBACK_TO_LOCAL = parseBooleanEnv(
+  process.env.DEFAULT_APIFY_COMPARE_FALLBACK_TO_LOCAL,
+  true,
+);
+
+export const APIFY_COMPARE_TIMEOUT_MS = parseIntEnv(process.env.DEFAULT_APIFY_COMPARE_TIMEOUT_MS, 120_000, {
+  min: 5_000,
+  max: 300_000,
+});
