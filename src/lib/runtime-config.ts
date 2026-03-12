@@ -65,6 +65,20 @@ export const ROW_PACING_DELAY_MS = parseIntEnv(process.env.DEFAULT_ROW_PACING_DE
   max: 20_000,
 });
 
+export const COMPARE_TRANSIENT_RETRY_COUNT = parseIntEnv(process.env.DEFAULT_COMPARE_TRANSIENT_RETRY_COUNT, 2, {
+  min: 0,
+  max: 5,
+});
+
+export const COMPARE_TRANSIENT_RETRY_DELAY_MS = parseIntEnv(
+  process.env.DEFAULT_COMPARE_TRANSIENT_RETRY_DELAY_MS,
+  2_000,
+  {
+    min: 0,
+    max: 20_000,
+  },
+);
+
 export const MAX_DISCOVERY_PAGES_PER_SITE = parseIntEnv(process.env.DEFAULT_MAX_DISCOVERY_PAGES_PER_SITE, 300, {
   min: 10,
   max: 2_000,
@@ -85,10 +99,14 @@ export const BLOCKED_RETRY_DELAY_MS = parseIntEnv(process.env.DEFAULT_BLOCKED_RE
   max: 30_000,
 });
 
-export const PLAYWRIGHT_DISCOVERY_DELAY_MS = parseIntEnv(process.env.DEFAULT_PLAYWRIGHT_DISCOVERY_DELAY_MS, 900, {
-  min: 0,
-  max: 15_000,
-});
+export const LOCAL_DISCOVERY_DELAY_MS = parseIntEnv(
+  process.env.DEFAULT_LOCAL_DISCOVERY_DELAY_MS ?? process.env.DEFAULT_PLAYWRIGHT_DISCOVERY_DELAY_MS,
+  900,
+  {
+    min: 0,
+    max: 15_000,
+  },
+);
 
 export const APIFY_DISCOVERY_FALLBACK_TO_LOCAL = parseBooleanEnv(
   process.env.DEFAULT_APIFY_DISCOVERY_FALLBACK_TO_LOCAL,
@@ -100,9 +118,19 @@ export const APIFY_MAX_CONCURRENCY = parseIntEnv(process.env.DEFAULT_APIFY_MAX_C
   max: 50,
 });
 
+export const APIFY_POLL_RETRY_COUNT = parseIntEnv(process.env.DEFAULT_APIFY_POLL_RETRY_COUNT, 3, {
+  min: 0,
+  max: 5,
+});
+
+export const APIFY_POLL_RETRY_DELAY_MS = parseIntEnv(process.env.DEFAULT_APIFY_POLL_RETRY_DELAY_MS, 1_500, {
+  min: 0,
+  max: 20_000,
+});
+
 export const APIFY_USE_PROXY = parseBooleanEnv(process.env.DEFAULT_APIFY_USE_PROXY, true);
 
-export const APIFY_COMPARE_FETCH_ENABLED = parseBooleanEnv(process.env.DEFAULT_APIFY_COMPARE_FETCH_ENABLED, true);
+export const APIFY_COMPARE_FETCH_ENABLED = parseBooleanEnv(process.env.DEFAULT_APIFY_COMPARE_FETCH_ENABLED, false);
 
 export const APIFY_COMPARE_FALLBACK_TO_LOCAL = parseBooleanEnv(
   process.env.DEFAULT_APIFY_COMPARE_FALLBACK_TO_LOCAL,

@@ -1,16 +1,18 @@
 import axios from "axios";
 import { load } from "cheerio";
-import { fetchPage } from "@/lib/fetch-page";
+import { fetchPage, parsePageDataFromHtml } from "@/lib/fetch-page";
 import {
   APIFY_DISCOVERY_FALLBACK_TO_LOCAL,
   APIFY_MAX_CONCURRENCY,
+  APIFY_POLL_RETRY_COUNT,
+  APIFY_POLL_RETRY_DELAY_MS,
   APIFY_USE_PROXY,
+  LOCAL_DISCOVERY_DELAY_MS,
   MAX_DISCOVERY_PAGES_PER_SITE,
-  PLAYWRIGHT_DISCOVERY_DELAY_MS,
   REQUEST_TIMEOUT_MS,
 } from "@/lib/runtime-config";
 import { assertSafePublicUrl } from "@/lib/security";
-import type { UrlPair } from "@/lib/types";
+import type { DiscoveryPageSnapshot, UrlPair } from "@/lib/types";
 import { resolveHref } from "@/lib/url";
 
 const NON_HTML_EXTENSION_RE = /\.(?:pdf|jpe?g|png|gif|webp|svg|ico|bmp|tiff|mp4|mp3|wav|zip|rar|7z|gz|tar|xml|json|txt|css|js)$/i;
@@ -27,12 +29,19 @@ const EXCLUDED_DISCOVERY_PATH_PATTERNS = [
 ];
 
 type SideKey = "production" | "staging";
-type SideProvider = "apify" | "playwright" | "done";
+type SideProvider = "apify" | "static" | "done";
 
 type ApifyRunResponse = {
   data?: {
     id?: string;
     defaultDatasetId?: string;
+    status?: string;
+  };
+};
+
+type ApifyAbortResponse = {
+  data?: {
+    id?: string;
     status?: string;
   };
 };
@@ -56,6 +65,7 @@ export type DiscoverySideState = {
   apifyDatasetId: string;
   apifyOffset: number;
   apifyFinished: boolean;
+  rootRedirectedToProduction: boolean;
   queue: string[];
   visited: string[];
 };
@@ -76,6 +86,10 @@ export type DiscoveryJobState = {
   nextRowIndex: number;
   warnings: string[];
   paths: Record<string, DiscoveryPathState>;
+  pageCache: {
+    production: Record<string, DiscoveryPageSnapshot>;
+    staging: Record<string, DiscoveryPageSnapshot>;
+  };
   production: DiscoverySideState;
   staging: DiscoverySideState;
 };
@@ -222,6 +236,51 @@ function buildApifyHeaders(token: string) {
   };
 }
 
+function isRetryableApifyError(error: unknown) {
+  if (axios.isAxiosError(error)) {
+    const status = error.response?.status;
+    if (status && [429, 502, 503, 504].includes(status)) {
+      return true;
+    }
+    const code = error.code?.toUpperCase();
+    return ["ECONNABORTED", "ECONNRESET", "ETIMEDOUT", "EAI_AGAIN"].includes(code ?? "");
+  }
+
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const normalized = error.message.toLowerCase();
+  return (
+    normalized.includes("timeout") ||
+    normalized.includes("timed out") ||
+    normalized.includes("gateway") ||
+    normalized.includes("econnreset")
+  );
+}
+
+async function withApifyRetries<T>(task: () => Promise<T>) {
+  let attempt = 0;
+  let lastError: unknown;
+
+  while (attempt <= APIFY_POLL_RETRY_COUNT) {
+    try {
+      return await task();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= APIFY_POLL_RETRY_COUNT || !isRetryableApifyError(error)) {
+        break;
+      }
+      attempt += 1;
+      if (APIFY_POLL_RETRY_DELAY_MS > 0) {
+        await delay(APIFY_POLL_RETRY_DELAY_MS * attempt);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 function describeApifyError(error: unknown) {
   if (axios.isAxiosError(error)) {
     const status = error.response?.status;
@@ -272,7 +331,7 @@ function handleApifyFailure(state: DiscoveryJobState, side: SideKey, message: st
   appendWarning(state, message);
   const info = sideState(state, side);
   if (APIFY_DISCOVERY_FALLBACK_TO_LOCAL) {
-    info.provider = "playwright";
+    info.provider = "static";
     if (!info.queue.includes("/")) {
       info.queue.push("/");
     }
@@ -310,6 +369,9 @@ function maybeAddRedirectHostAlias(state: DiscoveryJobState, side: SideKey, cand
   if (!candidateHost.trim()) {
     return;
   }
+  if (side === "staging" && isAllowedHost(state.production, candidateHost)) {
+    return;
+  }
   if (addAllowedHost(info, candidateHost)) {
     appendWarning(state, `${side}: added redirect host alias ${normalizeHost(candidateHost)}`);
   }
@@ -341,6 +403,8 @@ function maybeStopStagingDiscoveryOnRootRedirect(
     return false;
   }
 
+  info.allowedHosts = getDefaultHostAliases(info.host);
+  info.rootRedirectedToProduction = true;
   info.provider = "done";
   info.apifyFinished = true;
   appendWarning(
@@ -398,6 +462,44 @@ function updatePathForSide(state: DiscoveryJobState, side: SideKey, pathKey: str
   }
 }
 
+function cacheForSide(state: DiscoveryJobState, side: SideKey) {
+  if (!state.pageCache) {
+    state.pageCache = {
+      production: {},
+      staging: {},
+    };
+  }
+  if (!state.pageCache.production) {
+    state.pageCache.production = {};
+  }
+  if (!state.pageCache.staging) {
+    state.pageCache.staging = {};
+  }
+  return side === "production" ? state.pageCache.production : state.pageCache.staging;
+}
+
+function getCachedSnapshot(state: DiscoveryJobState, side: SideKey, pathKey: string) {
+  return cacheForSide(state, side)[pathKey] ?? null;
+}
+
+function setCachedSnapshot(
+  state: DiscoveryJobState,
+  side: SideKey,
+  pathKey: string,
+  snapshot: DiscoveryPageSnapshot,
+) {
+  cacheForSide(state, side)[pathKey] = snapshot;
+}
+
+function extractHtmlFromApifyItem(item: unknown): string {
+  if (!item || typeof item !== "object") {
+    return "";
+  }
+
+  const candidate = item as Record<string, unknown>;
+  return typeof candidate.html === "string" ? candidate.html : "";
+}
+
 function extractUrlFromApifyItem(item: unknown): string | null {
   if (!item || typeof item !== "object") {
     return null;
@@ -451,19 +553,24 @@ async function startApifyRunIfNeeded(state: DiscoveryJobState, side: SideKey) {
     maxRequestRetries: 2,
     requestTimeoutSecs: 60,
     maxConcurrency: APIFY_MAX_CONCURRENCY,
+    saveHtml: true,
+    saveMarkdown: false,
+    htmlTransformer: "none",
     proxyConfiguration: state.useApifyProxy ? { useApifyProxy: true } : undefined,
     initialCookies,
     customHttpHeaders: info.cookieHeader ? { Cookie: info.cookieHeader } : {},
   };
 
   try {
-    const runResponse = await axios.post<ApifyRunResponse>(actorRunUrl, actorInput, {
-      timeout: 60_000,
-      params: {
-        token,
-      },
-      headers: buildApifyHeaders(token),
-    });
+    const runResponse = await withApifyRetries(() =>
+      axios.post<ApifyRunResponse>(actorRunUrl, actorInput, {
+        timeout: 60_000,
+        params: {
+          token,
+        },
+        headers: buildApifyHeaders(token),
+      }),
+    );
 
     info.apifyRunId = runResponse.data?.data?.id ?? "";
     info.apifyDatasetId = runResponse.data?.data?.defaultDatasetId ?? "";
@@ -474,6 +581,38 @@ async function startApifyRunIfNeeded(state: DiscoveryJobState, side: SideKey) {
       side,
       `${side}: apify actor run failed (${describeApifyError(error)})`,
     );
+  }
+}
+
+async function abortApifyRun(runId: string) {
+  if (!runId) {
+    return;
+  }
+
+  const { token } = getApifyConfig();
+  await axios.post<ApifyAbortResponse>(`https://api.apify.com/v2/actor-runs/${runId}/abort`, undefined, {
+    timeout: REQUEST_TIMEOUT_MS,
+    params: { token },
+    headers: buildApifyHeaders(token),
+    validateStatus: (status) => (status >= 200 && status < 300) || status === 404 || status === 409,
+  });
+}
+
+export async function abortDiscoveryApifyRuns(state: DiscoveryJobState) {
+  const runIds = new Set<string>();
+  if (state.production.apifyRunId && !state.production.apifyFinished) {
+    runIds.add(state.production.apifyRunId);
+  }
+  if (state.staging.apifyRunId && !state.staging.apifyFinished) {
+    runIds.add(state.staging.apifyRunId);
+  }
+
+  for (const runId of runIds) {
+    try {
+      await abortApifyRun(runId);
+    } catch {
+      // Best-effort abort only.
+    }
   }
 }
 
@@ -498,11 +637,13 @@ async function pollApifySide(state: DiscoveryJobState, side: SideKey) {
 
   if (!info.apifyDatasetId && info.apifyRunId) {
     try {
-      const runDetails = await axios.get<ApifyRunResponse>(`https://api.apify.com/v2/actor-runs/${info.apifyRunId}`, {
-        timeout: REQUEST_TIMEOUT_MS,
-        params: { token },
-        headers: buildApifyHeaders(token),
-      });
+      const runDetails = await withApifyRetries(() =>
+        axios.get<ApifyRunResponse>(`https://api.apify.com/v2/actor-runs/${info.apifyRunId}`, {
+          timeout: REQUEST_TIMEOUT_MS,
+          params: { token },
+          headers: buildApifyHeaders(token),
+        }),
+      );
       info.apifyDatasetId = runDetails.data?.data?.defaultDatasetId ?? "";
     } catch {
       // Ignore for now; it might be eventually available.
@@ -511,16 +652,18 @@ async function pollApifySide(state: DiscoveryJobState, side: SideKey) {
 
   if (info.apifyDatasetId) {
     try {
-      const datasetItems = await axios.get<unknown[]>(`https://api.apify.com/v2/datasets/${info.apifyDatasetId}/items`, {
-        timeout: 60_000,
-        params: {
-          token,
-          clean: true,
-          offset: info.apifyOffset,
-          limit: APIFY_DATASET_PAGE_SIZE,
-        },
-        headers: buildApifyHeaders(token),
-      });
+      const datasetItems = await withApifyRetries(() =>
+        axios.get<unknown[]>(`https://api.apify.com/v2/datasets/${info.apifyDatasetId}/items`, {
+          timeout: 60_000,
+          params: {
+            token,
+            clean: true,
+            offset: info.apifyOffset,
+            limit: APIFY_DATASET_PAGE_SIZE,
+          },
+          headers: buildApifyHeaders(token),
+        }),
+      );
 
       const items = Array.isArray(datasetItems.data) ? datasetItems.data : [];
       for (const item of items) {
@@ -556,6 +699,16 @@ async function pollApifySide(state: DiscoveryJobState, side: SideKey) {
             continue;
           }
           updatePathForSide(state, side, pathKey);
+          const html = extractHtmlFromApifyItem(item);
+          if (html.trim()) {
+            const requestedUrl = toAbsolutePathUrl(info.origin, pathKey);
+            setCachedSnapshot(
+              state,
+              side,
+              pathKey,
+              parsePageDataFromHtml(requestedUrl, parsed.toString(), html, "apify"),
+            );
+          }
         } catch {
           // Ignore malformed URLs from dataset rows.
         }
@@ -573,11 +726,13 @@ async function pollApifySide(state: DiscoveryJobState, side: SideKey) {
   let runStatus = "";
   if (info.apifyRunId) {
     try {
-      const runDetails = await axios.get<ApifyRunResponse>(`https://api.apify.com/v2/actor-runs/${info.apifyRunId}`, {
-        timeout: REQUEST_TIMEOUT_MS,
-        params: { token },
-        headers: buildApifyHeaders(token),
-      });
+      const runDetails = await withApifyRetries(() =>
+        axios.get<ApifyRunResponse>(`https://api.apify.com/v2/actor-runs/${info.apifyRunId}`, {
+          timeout: REQUEST_TIMEOUT_MS,
+          params: { token },
+          headers: buildApifyHeaders(token),
+        }),
+      );
       runStatus = (runDetails.data?.data?.status ?? "").toUpperCase();
       if (!info.apifyDatasetId) {
         info.apifyDatasetId = runDetails.data?.data?.defaultDatasetId ?? info.apifyDatasetId;
@@ -612,9 +767,9 @@ async function pollApifySide(state: DiscoveryJobState, side: SideKey) {
   info.provider = "done";
 }
 
-async function processPlaywrightSideTick(state: DiscoveryJobState, side: SideKey) {
+async function processStaticSideTick(state: DiscoveryJobState, side: SideKey) {
   const info = sideState(state, side);
-  if (info.provider !== "playwright") {
+  if (info.provider !== "static") {
     return;
   }
 
@@ -639,12 +794,12 @@ async function processPlaywrightSideTick(state: DiscoveryJobState, side: SideKey
 
     const targetUrl = toAbsolutePathUrl(info.origin, currentPath);
     try {
-      if (PLAYWRIGHT_DISCOVERY_DELAY_MS > 0) {
-        await delay(PLAYWRIGHT_DISCOVERY_DELAY_MS);
+      if (LOCAL_DISCOVERY_DELAY_MS > 0) {
+        await delay(LOCAL_DISCOVERY_DELAY_MS);
       }
       const page = await fetchPage(targetUrl, {
         cookieHeader: info.cookieHeader,
-        strategy: "local-only",
+        strategy: "static-only",
       });
       const final = new URL(page.finalUrl);
       if (maybeStopStagingDiscoveryOnRootRedirect(state, side, final.hostname, final.pathname)) {
@@ -660,6 +815,16 @@ async function processPlaywrightSideTick(state: DiscoveryJobState, side: SideKey
         continue;
       }
       updatePathForSide(state, side, finalPath);
+      setCachedSnapshot(state, side, finalPath, {
+        requestedUrl: targetUrl,
+        finalUrl: page.finalUrl,
+        title: page.title,
+        description: page.description,
+        descriptionSource: page.descriptionSource,
+        metadataRenderer: page.metadataRenderer,
+        html: page.html,
+        usedRenderer: page.usedRenderer,
+      });
 
       const $ = load(page.html);
       const hrefs = $("a[href]")
@@ -734,6 +899,10 @@ export function createDiscoveryJobState(input: CreateDiscoveryStateInput): Disco
     nextRowIndex: 0,
     warnings: [],
     paths: {},
+    pageCache: {
+      production: {},
+      staging: {},
+    },
     production: {
       rootUrl: productionRoot.toString(),
       origin: productionRoot.origin,
@@ -746,6 +915,7 @@ export function createDiscoveryJobState(input: CreateDiscoveryStateInput): Disco
       apifyDatasetId: "",
       apifyOffset: 0,
       apifyFinished: false,
+      rootRedirectedToProduction: false,
       queue: [],
       visited: [],
     },
@@ -761,6 +931,7 @@ export function createDiscoveryJobState(input: CreateDiscoveryStateInput): Disco
       apifyDatasetId: "",
       apifyOffset: 0,
       apifyFinished: false,
+      rootRedirectedToProduction: false,
       queue: [],
       visited: [],
     },
@@ -773,13 +944,13 @@ export function createDiscoveryJobState(input: CreateDiscoveryStateInput): Disco
 
 export async function runDiscoveryTick(state: DiscoveryJobState): Promise<DiscoveryJobState> {
   await pollApifySide(state, "production");
-  await processPlaywrightSideTick(state, "production");
+  await processStaticSideTick(state, "production");
   if (state.production.provider !== "done") {
     return state;
   }
 
   await pollApifySide(state, "staging");
-  await processPlaywrightSideTick(state, "staging");
+  await processStaticSideTick(state, "staging");
   return state;
 }
 
@@ -799,6 +970,14 @@ export function getNextPendingComparison(state: DiscoveryJobState): PendingCompa
     };
   }
   return null;
+}
+
+export function getDiscoveryPageSnapshot(
+  state: DiscoveryJobState,
+  side: SideKey,
+  pathKey: string,
+) {
+  return getCachedSnapshot(state, side, pathKey);
 }
 
 export function markComparisonProcessed(state: DiscoveryJobState, rowIndex: number) {

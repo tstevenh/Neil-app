@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
+  abortDiscoveryApifyRuns,
   createDiscoveryJobState,
+  getDiscoveryPageSnapshot,
   getDiscoveryDiagnostics,
   getNextPendingComparison,
   isDiscoveryComplete,
@@ -10,7 +12,12 @@ import {
 } from "@/lib/discover";
 import type { CompareResult, RunRecord, RunStatus, UrlPair } from "@/lib/types";
 import { comparePair } from "@/lib/compare";
-import { MAX_RUNNING_RUNS_PER_USER, ROW_PACING_DELAY_MS } from "@/lib/runtime-config";
+import {
+  COMPARE_TRANSIENT_RETRY_COUNT,
+  COMPARE_TRANSIENT_RETRY_DELAY_MS,
+  MAX_RUNNING_RUNS_PER_USER,
+  ROW_PACING_DELAY_MS,
+} from "@/lib/runtime-config";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 const PROCESS_ROWS_PER_TICK = 1;
@@ -90,10 +97,57 @@ function buildFailedCompareResult(pair: UrlPair, message: string): CompareResult
     anchorLinksCount: 0,
     brokenLinks: [],
     hashLinks: [],
-    warnings: ["Comparison failed"],
+    warnings: [`Comparison failed: ${message}`],
     overallStatus: "FAIL",
     error: message,
   };
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientCompareError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const normalized = error.message.toLowerCase();
+  return (
+    normalized.includes("502") ||
+    normalized.includes("503") ||
+    normalized.includes("504") ||
+    normalized.includes("429") ||
+    normalized.includes("timeout") ||
+    normalized.includes("timed out") ||
+    normalized.includes("gateway") ||
+    normalized.includes("econnreset") ||
+    normalized.includes("socket hang up") ||
+    normalized.includes("network socket") ||
+    normalized.includes("fetch failed")
+  );
+}
+
+async function comparePairWithRetries(pair: UrlPair, options?: Parameters<typeof comparePair>[1]) {
+  let attempt = 0;
+  let lastError: unknown;
+
+  while (attempt <= COMPARE_TRANSIENT_RETRY_COUNT) {
+    try {
+      return await comparePair(pair, options);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= COMPARE_TRANSIENT_RETRY_COUNT || !isTransientCompareError(error)) {
+        break;
+      }
+      attempt += 1;
+      if (COMPARE_TRANSIENT_RETRY_DELAY_MS > 0) {
+        await delay(COMPARE_TRANSIENT_RETRY_DELAY_MS * attempt);
+      }
+    }
+  }
+
+  throw lastError;
 }
 
 async function updateRun(id: string, patch: Partial<RunRow>) {
@@ -348,7 +402,7 @@ async function processStandardRunTick(run: RunRow) {
 
     if (latest.completed >= latest.total) {
       await updateRun(latest.id, {
-        status: latest.errors.length > 0 ? "failed" : "completed",
+        status: "completed",
       });
       return;
     }
@@ -372,10 +426,9 @@ async function processStandardRunTick(run: RunRow) {
     let result: CompareResult;
     const nextErrors = [...latest.errors];
     try {
-      result = await comparePair(pair);
+      result = await comparePairWithRetries(pair);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown compare error";
-      nextErrors.push(`${pair.productionUrl} -> ${pair.stagingUrl}: ${message}`);
       result = buildFailedCompareResult(pair, message);
     }
 
@@ -392,7 +445,7 @@ async function processStandardRunTick(run: RunRow) {
       completed,
       progress,
       errors: nextErrors,
-      status: completed >= latest.total ? (nextErrors.length > 0 ? "failed" : "completed") : "running",
+      status: completed >= latest.total ? "completed" : "running",
     });
 
     remaining -= 1;
@@ -423,25 +476,30 @@ async function processDiscoveryRunTick(run: RunRow) {
   // Discovery state is persisted as JSON in Supabase.
   const state = discoveryJob.state as ReturnType<typeof createDiscoveryJobState>;
   const nextErrors = [...latest.errors];
+  let fatalError = false;
 
   try {
     await runDiscoveryTick(state);
   } catch (error) {
     nextErrors.push(`Discovery tick failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+    fatalError = true;
   }
 
   const pending = isDiscoveryComplete(state) ? getNextPendingComparison(state) : null;
-  if (pending) {
+  if (pending && !fatalError) {
     let result: CompareResult;
     try {
-      result = await comparePair(pending.pair, {
+      const prefetchedProductionPage = getDiscoveryPageSnapshot(state, "production", pending.pathKey);
+      const prefetchedStagingPage = getDiscoveryPageSnapshot(state, "staging", pending.pathKey);
+      result = await comparePairWithRetries(pending.pair, {
         productionCookieHeader: state.production.cookieHeader,
         stagingCookieHeader: state.staging.cookieHeader,
         useApifyProxy: state.useApifyProxy,
+        prefetchedProductionPage,
+        prefetchedStagingPage,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown compare error";
-      nextErrors.push(`${pending.pair.productionUrl} -> ${pending.pair.stagingUrl}: ${message}`);
       result = buildFailedCompareResult(pending.pair, message);
     }
 
@@ -468,12 +526,16 @@ async function processDiscoveryRunTick(run: RunRow) {
     return;
   }
 
+  if (fatalError) {
+    await abortDiscoveryApifyRuns(state);
+  }
+
   await updateRun(latest.id, {
     total: Math.max(summary.total, 1),
     completed: summary.completed,
     progress,
     errors: nextErrors,
-    status: done ? (nextErrors.length > 0 ? "failed" : "completed") : "running",
+    status: fatalError ? "failed" : done ? "completed" : "running",
   });
 }
 
@@ -617,6 +679,13 @@ export async function cancelRun(userId: string, id: string) {
 
   const nextErrors = Array.isArray(run.errors) ? [...run.errors] : [];
   nextErrors.push(`Canceled by user at ${new Date().toISOString()}`);
+
+  if (getRunMode(run) === "discover_stream") {
+    const discoveryJob = await readDiscoveryJob(id);
+    if (discoveryJob?.state && typeof discoveryJob.state === "object") {
+      await abortDiscoveryApifyRuns(discoveryJob.state as ReturnType<typeof createDiscoveryJobState>);
+    }
+  }
 
   await updateRun(id, {
     status: "canceled",

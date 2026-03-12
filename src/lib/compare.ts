@@ -9,12 +9,14 @@ import {
 } from "@/lib/runtime-config";
 import { assertSafePublicUrl } from "@/lib/security";
 import { normalizeDedupeLink, normalizeMetaText, normalizeSlug, resolveHref } from "@/lib/url";
-import type { BadLink, CompareResult, UrlPair } from "@/lib/types";
+import type { BadLink, CompareResult, DiscoveryPageSnapshot, UrlPair } from "@/lib/types";
 
 type ComparePairOptions = {
   productionCookieHeader?: string;
   stagingCookieHeader?: string;
   useApifyProxy?: boolean;
+  prefetchedProductionPage?: DiscoveryPageSnapshot | null;
+  prefetchedStagingPage?: DiscoveryPageSnapshot | null;
 };
 
 function delay(ms: number) {
@@ -39,7 +41,7 @@ async function fetchWithBlockedRetry(
   let attempts = 0;
   let lastPage = await fetchPage(url, {
     cookieHeader: options.cookieHeader,
-    strategy: "apify-first",
+    strategy: "static-only",
     useApifyProxy: options.useApifyProxy,
   });
 
@@ -48,7 +50,7 @@ async function fetchWithBlockedRetry(
     await delay(BLOCKED_RETRY_DELAY_MS);
     lastPage = await fetchPage(url, {
       cookieHeader: options.cookieHeader,
-      strategy: "apify-first",
+      strategy: "static-only",
       useApifyProxy: options.useApifyProxy,
     });
   }
@@ -58,6 +60,22 @@ async function fetchWithBlockedRetry(
     blocked: looksBlocked(lastPage.title, lastPage.html),
     attempts,
   };
+}
+
+async function resolveComparePage(
+  url: string,
+  prefetchedPage: DiscoveryPageSnapshot | null | undefined,
+  options: { cookieHeader?: string; useApifyProxy?: boolean },
+) {
+  if (prefetchedPage) {
+    return {
+      page: prefetchedPage,
+      blocked: looksBlocked(prefetchedPage.title, prefetchedPage.html),
+      attempts: 0,
+    };
+  }
+
+  return fetchWithBlockedRetry(url, options);
 }
 
 function computeOverallStatus(input: {
@@ -177,13 +195,13 @@ export async function comparePair(pair: UrlPair, options: ComparePairOptions = {
   }
 
   const prodFetch = hasProduction
-    ? await fetchWithBlockedRetry(pair.productionUrl, {
+    ? await resolveComparePage(pair.productionUrl, options.prefetchedProductionPage, {
         cookieHeader: options.productionCookieHeader,
         useApifyProxy: options.useApifyProxy,
       })
     : null;
   const stagingFetch = hasStaging
-    ? await fetchWithBlockedRetry(pair.stagingUrl, {
+    ? await resolveComparePage(pair.stagingUrl, options.prefetchedStagingPage, {
         cookieHeader: options.stagingCookieHeader,
         useApifyProxy: options.useApifyProxy,
       })

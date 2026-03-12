@@ -5,7 +5,6 @@ import {
   APIFY_COMPARE_FETCH_ENABLED,
   APIFY_COMPARE_TIMEOUT_MS,
   APIFY_USE_PROXY,
-  FETCH_PAGE_NAVIGATION_DELAY_MS,
   REQUEST_TIMEOUT_MS,
 } from "@/lib/runtime-config";
 import { normalizeMetaText } from "@/lib/url";
@@ -19,14 +18,14 @@ type PageData = {
   title: string;
   description: string;
   descriptionSource: "meta:description" | "none";
-  metadataRenderer: "apify" | "static" | "playwright";
+  metadataRenderer: "apify" | "static";
   html: string;
-  usedRenderer: "apify" | "static" | "playwright";
+  usedRenderer: "apify" | "static";
 };
 
 type DescriptionSource = PageData["descriptionSource"];
 
-type FetchStrategy = "apify-first" | "local-only";
+type FetchStrategy = "apify-first" | "static-only" | "local-only";
 
 type FetchPageOptions = {
   cookieHeader?: string;
@@ -53,29 +52,6 @@ type ApifyDatasetItem = {
 const DEFAULT_BROWSER_USER_AGENT =
   process.env.DEFAULT_BROWSER_USER_AGENT?.trim() ||
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-
-type BrowserLike = {
-  newContext: (options?: {
-    userAgent?: string;
-    locale?: string;
-    extraHTTPHeaders?: Record<string, string>;
-  }) => Promise<{
-    newPage: () => Promise<{
-      goto: (
-        target: string,
-        options: { waitUntil: "domcontentloaded"; timeout: number },
-      ) => Promise<{ url: () => string } | null>;
-      content: () => Promise<string>;
-      url: () => string;
-    }>;
-    close: () => Promise<void>;
-  }>;
-  close: () => Promise<void>;
-};
-
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function extractMetaDescription($: ReturnType<typeof load>): { content: string; source: DescriptionSource } {
   const selectors = [
@@ -128,6 +104,15 @@ function parseFromHtml(
     html,
     usedRenderer,
   };
+}
+
+export function parsePageDataFromHtml(
+  requestedUrl: string,
+  finalUrl: string,
+  html: string,
+  usedRenderer: PageData["usedRenderer"],
+): PageData {
+  return parseFromHtml(requestedUrl, finalUrl, html, usedRenderer);
 }
 
 function mergePageMetadata(primary: PageData, secondary: PageData): PageData {
@@ -229,7 +214,7 @@ async function tryApify(url: string, options: FetchPageOptions): Promise<PageDat
       `https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/run-sync-get-dataset-items`,
       {
         startUrls: [{ url }],
-        crawlerType: "playwright:adaptive",
+        crawlerType: "cheerio",
         maxCrawlPages: 1,
         maxResults: 1,
         maxCrawlDepth: 0,
@@ -287,76 +272,6 @@ async function tryApify(url: string, options: FetchPageOptions): Promise<PageDat
   }
 }
 
-function shouldUseServerlessPlaywright() {
-  return Boolean(process.env.VERCEL) || Boolean(process.env.AWS_EXECUTION_ENV) || process.env.NODE_ENV === "production";
-}
-
-async function launchFallbackBrowser(): Promise<BrowserLike> {
-  if (shouldUseServerlessPlaywright()) {
-    const [{ chromium: playwrightChromium }, chromium] = await Promise.all([
-      import("playwright-core"),
-      import("@sparticuz/chromium"),
-    ]);
-
-    return playwrightChromium.launch({
-      args: chromium.default.args,
-      executablePath: await chromium.default.executablePath(),
-      headless: true,
-    }) as Promise<BrowserLike>;
-  }
-
-  const playwright = await import("playwright");
-  return playwright.chromium.launch({ headless: true }) as Promise<BrowserLike>;
-}
-
-async function tryPlaywright(url: string, options: FetchPageOptions): Promise<PageData> {
-  let browser: BrowserLike | null = null;
-  let context:
-    | {
-        close: () => Promise<void>;
-        newPage: () => Promise<{
-          goto: (
-            target: string,
-            options: { waitUntil: "domcontentloaded"; timeout: number },
-          ) => Promise<{ url: () => string } | null>;
-          content: () => Promise<string>;
-          url: () => string;
-        }>;
-      }
-    | null = null;
-
-  try {
-    browser = await launchFallbackBrowser();
-    context = await browser.newContext({
-      userAgent: DEFAULT_BROWSER_USER_AGENT,
-      locale: "en-US",
-      extraHTTPHeaders: options.cookieHeader ? { Cookie: options.cookieHeader } : undefined,
-    });
-    const page = await context.newPage();
-    if (FETCH_PAGE_NAVIGATION_DELAY_MS > 0) {
-      await delay(FETCH_PAGE_NAVIGATION_DELAY_MS);
-    }
-
-    const response = await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: REQUEST_TIMEOUT_MS,
-    });
-
-    const html = await page.content();
-    const finalUrl = response?.url() ?? page.url() ?? url;
-    return parseFromHtml(url, finalUrl, html, "playwright");
-  } catch (error) {
-    throw new Error(error instanceof Error ? error.message : "Unknown Playwright error");
-  } finally {
-    if (context) {
-      await context.close().catch(() => undefined);
-    }
-    if (browser) {
-      await browser.close().catch(() => undefined);
-    }
-  }
-}
-
 async function tryStatic(url: string, options: FetchPageOptions): Promise<PageData> {
   try {
     const response = await axios.get<string>(url, {
@@ -385,7 +300,7 @@ async function tryStatic(url: string, options: FetchPageOptions): Promise<PageDa
 }
 
 export async function fetchPage(url: string, options: FetchPageOptions = {}): Promise<PageData> {
-  const strategy = options.strategy ?? "local-only";
+  const strategy = options.strategy ?? "static-only";
   const failures: string[] = [];
 
   if (strategy === "apify-first" && APIFY_COMPARE_FETCH_ENABLED) {
@@ -397,12 +312,6 @@ export async function fetchPage(url: string, options: FetchPageOptions = {}): Pr
         throw new Error(`Unable to fetch URL: ${url} (${failures.join("; ")})`);
       }
     }
-  }
-
-  try {
-    return await tryPlaywright(url, options);
-  } catch (error) {
-    failures.push(`playwright: ${error instanceof Error ? error.message : "Unknown error"}`);
   }
 
   try {

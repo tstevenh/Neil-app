@@ -37,6 +37,17 @@ export type UrlPair = {
   stagingUrl: string;
 };
 
+export type DiscoveryPageSnapshot = {
+  requestedUrl: string;
+  finalUrl: string;
+  title: string;
+  description: string;
+  descriptionSource: "meta:description" | "none";
+  metadataRenderer: "apify" | "static";
+  html: string;
+  usedRenderer: "apify" | "static";
+};
+
 export type RunRecord = {
   id: string;
   userId: string;

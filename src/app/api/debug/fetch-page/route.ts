@@ -31,7 +31,12 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => ({}));
   const url = typeof body?.url === "string" ? body.url.trim() : "";
   const cookieHeader = typeof body?.cookieHeader === "string" ? body.cookieHeader.trim() : "";
-  const strategy = body?.strategy === "apify-first" ? "apify-first" : "local-only";
+  const strategy =
+    body?.strategy === "apify-first"
+      ? "apify-first"
+      : body?.strategy === "static-only"
+        ? "static-only"
+        : "local-only";
   const useApifyProxy = typeof body?.useApifyProxy === "boolean" ? body.useApifyProxy : undefined;
 
   if (!url) {
