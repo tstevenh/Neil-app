@@ -8,6 +8,8 @@ import { getSupabaseBrowser } from "@/lib/supabase-browser";
 
 const RUN_LABELS_STORAGE_KEY = "qa-run-source-labels";
 
+type ApiBody = Record<string, unknown>;
+
 export default function Home() {
   const router = useRouter();
   const [token, setToken] = useState<string | null>(null);
@@ -93,6 +95,22 @@ export default function Home() {
     return response;
   }
 
+  async function readApiBody(response: Response): Promise<ApiBody> {
+    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+
+    if (contentType.includes("application/json")) {
+      return (await response.json()) as ApiBody;
+    }
+
+    const raw = await response.text();
+    const snippet = raw.replace(/\s+/g, " ").trim().slice(0, 200) || "Empty response body";
+    throw new Error(`API returned non-JSON response (${response.status}): ${snippet}`);
+  }
+
+  function getApiString(data: ApiBody, key: string, fallback: string) {
+    return typeof data[key] === "string" ? (data[key] as string) : fallback;
+  }
+
   async function refreshRuns() {
     if (!token) {
       return;
@@ -100,13 +118,13 @@ export default function Home() {
 
     try {
       const response = await apiFetch("/api/runs");
-      const data = await response.json();
+      const data = await readApiBody(response);
       if (!response.ok) {
-        setMessage(data.error ?? "Failed to fetch runs");
+        setMessage(typeof data.error === "string" ? data.error : "Failed to fetch runs");
         return;
       }
 
-      setRuns(data.runs ?? []);
+      setRuns(Array.isArray(data.runs) ? (data.runs as RunRecord[]) : []);
     } catch (error) {
       const messageText = error instanceof Error ? error.message : "Failed to fetch runs";
       if (messageText.toLowerCase().includes("session expired")) {
@@ -120,9 +138,9 @@ export default function Home() {
   async function loadRunDetails(runId: string) {
     try {
       const response = await apiFetch(`/api/runs/${runId}`);
-      const data = await response.json();
+      const data = await readApiBody(response);
       if (!response.ok) {
-        setMessage(data.error ?? "Failed to fetch run details");
+        setMessage(typeof data.error === "string" ? data.error : "Failed to fetch run details");
         return;
       }
 
@@ -130,8 +148,8 @@ export default function Home() {
         ...current,
         [runId]: data as RunRecord,
       }));
-    } catch {
-      setMessage("Network error while fetching run details");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Network error while fetching run details");
     }
   }
 
@@ -179,17 +197,23 @@ export default function Home() {
         body: JSON.stringify({ productionUrl, stagingUrl }),
       });
 
-      const data = await response.json();
+      const data = await readApiBody(response);
       if (!response.ok) {
-        setMessage(data.error ?? "Failed to start compare run");
+        setMessage(typeof data.error === "string" ? data.error : "Failed to start compare run");
         return;
       }
 
-      saveRunLabel(data.runId, "Single Compare");
+      const runId = getApiString(data, "runId", "");
+      if (!runId) {
+        setMessage("Compare API did not return a run ID");
+        return;
+      }
+
+      saveRunLabel(runId, "Single Compare");
       void refreshRuns();
-      setMessage(`Run started: ${data.runId}`);
-    } catch {
-      setMessage("Network error: unable to reach API. Confirm `npm run dev` is running.");
+      setMessage(`Run started: ${runId}`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Network error: unable to reach API.");
     }
   }
 
@@ -208,17 +232,23 @@ export default function Home() {
         body: formData,
       });
 
-      const data = await response.json();
+      const data = await readApiBody(response);
       if (!response.ok) {
-        setMessage(data.error ?? "Failed to start bulk compare");
+        setMessage(typeof data.error === "string" ? data.error : "Failed to start bulk compare");
         return;
       }
 
-      saveRunLabel(data.runId, bulkFile.name);
+      const runId = getApiString(data, "runId", "");
+      if (!runId) {
+        setMessage("Bulk compare API did not return a run ID");
+        return;
+      }
+
+      saveRunLabel(runId, bulkFile.name);
       void refreshRuns();
-      setMessage(`Bulk run started: ${data.runId}`);
-    } catch {
-      setMessage("Network error: unable to reach bulk API. Refresh and try again.");
+      setMessage(`Bulk run started: ${runId}`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Network error: unable to reach bulk API.");
     }
   }
 
@@ -240,9 +270,11 @@ export default function Home() {
         }),
       });
 
-      const data = await response.json();
+      const data = await readApiBody(response);
       if (!response.ok) {
-        setMessage(data.error ?? "Failed to start homepage crawl compare");
+        setMessage(
+          typeof data.error === "string" ? data.error : "Failed to start homepage crawl compare",
+        );
         return;
       }
 
@@ -254,15 +286,23 @@ export default function Home() {
         // Use fallback label when URL parsing fails unexpectedly.
       }
 
-      saveRunLabel(data.runId, sourceLabel);
+      const runId = getApiString(data, "runId", "");
+      if (!runId) {
+        setMessage("Homepage crawl API did not return a run ID");
+        return;
+      }
+
+      saveRunLabel(runId, sourceLabel);
       void refreshRuns();
 
       const warningCount = Array.isArray(data.discoverWarnings) ? data.discoverWarnings.length : 0;
       const rowCount = typeof data.total === "number" ? data.total : 0;
       const warningText = warningCount > 0 ? ` | Discovery warnings: ${warningCount}` : "";
-      setMessage(`Homepage crawl run started: ${data.runId} | Rows: ${rowCount}${warningText}`);
-    } catch {
-      setMessage("Network error: unable to start homepage crawl compare.");
+      setMessage(`Homepage crawl run started: ${runId} | Rows: ${rowCount}${warningText}`);
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "Network error: unable to start homepage crawl compare.",
+      );
     } finally {
       setIsStartingDiscover(false);
     }
@@ -280,8 +320,8 @@ export default function Home() {
     try {
       const response = await apiFetch(`/api/runs/${runId}/export`);
       if (!response.ok) {
-        const data = await response.json();
-        setMessage(data.error ?? "Failed to export CSV");
+        const data = await readApiBody(response);
+        setMessage(typeof data.error === "string" ? data.error : "Failed to export CSV");
         return;
       }
 
@@ -292,8 +332,8 @@ export default function Home() {
       anchor.download = exportFilename;
       anchor.click();
       URL.revokeObjectURL(url);
-    } catch {
-      setMessage("Failed to download CSV");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to download CSV");
     }
   }
 
@@ -303,9 +343,9 @@ export default function Home() {
       const response = await apiFetch(`/api/runs/${runId}/cancel`, {
         method: "POST",
       });
-      const data = await response.json();
+      const data = await readApiBody(response);
       if (!response.ok) {
-        setMessage(data.error ?? "Failed to cancel run");
+        setMessage(typeof data.error === "string" ? data.error : "Failed to cancel run");
         return;
       }
 
@@ -314,8 +354,8 @@ export default function Home() {
       if (expandedRun === runId) {
         await loadRunDetails(runId);
       }
-    } catch {
-      setMessage("Network error while canceling run");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Network error while canceling run");
     } finally {
       setCancelingRunIds((current) => ({ ...current, [runId]: false }));
     }
@@ -328,17 +368,23 @@ export default function Home() {
       const response = await apiFetch(`/api/runs/${runId}/retry-failed`, {
         method: "POST",
       });
-      const data = await response.json();
+      const data = await readApiBody(response);
       if (!response.ok) {
-        setMessage(data.error ?? "Failed to retry failed rows");
+        setMessage(typeof data.error === "string" ? data.error : "Failed to retry failed rows");
         return;
       }
 
-      saveRunLabel(data.runId, `Retry Failed - ${source}`);
+      const retryRunId = getApiString(data, "runId", "");
+      if (!retryRunId) {
+        setMessage("Retry API did not return a run ID");
+        return;
+      }
+
+      saveRunLabel(retryRunId, `Retry Failed - ${source}`);
       await refreshRuns();
-      setMessage(`Retry run started: ${data.runId}`);
-    } catch {
-      setMessage("Network error while retrying failed rows");
+      setMessage(`Retry run started: ${retryRunId}`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Network error while retrying failed rows");
     } finally {
       setRetryingRunId(null);
     }
