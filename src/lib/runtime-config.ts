@@ -90,6 +90,11 @@ export const PLAYWRIGHT_DISCOVERY_DELAY_MS = parseIntEnv(process.env.DEFAULT_PLA
   max: 15_000,
 });
 
+export const APIFY_DISCOVERY_FALLBACK_TO_LOCAL = parseBooleanEnv(
+  process.env.DEFAULT_APIFY_DISCOVERY_FALLBACK_TO_LOCAL,
+  true,
+);
+
 export const APIFY_MAX_CONCURRENCY = parseIntEnv(process.env.DEFAULT_APIFY_MAX_CONCURRENCY, 4, {
   min: 1,
   max: 50,

@@ -15,6 +15,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
 const PROCESS_ROWS_PER_TICK = 1;
 type RunMode = "standard" | "discover_stream";
+const activeRunTicks = new Set<string>();
 
 type RunRow = {
   id: string;
@@ -429,7 +430,7 @@ async function processDiscoveryRunTick(run: RunRow) {
     nextErrors.push(`Discovery tick failed: ${error instanceof Error ? error.message : "Unknown error"}`);
   }
 
-  const pending = getNextPendingComparison(state);
+  const pending = isDiscoveryComplete(state) ? getNextPendingComparison(state) : null;
   if (pending) {
     let result: CompareResult;
     try {
@@ -485,6 +486,19 @@ async function processRunTick(run: RunRow) {
   await processStandardRunTick(run);
 }
 
+async function processRunTickWithLock(run: RunRow) {
+  if (activeRunTicks.has(run.id)) {
+    return;
+  }
+
+  activeRunTicks.add(run.id);
+  try {
+    await processRunTick(run);
+  } finally {
+    activeRunTicks.delete(run.id);
+  }
+}
+
 async function tryStartQueuedRuns(userId: string) {
   const runningCount = await getRunningRunsCountByUser(userId);
   const availableSlots = Math.max(0, MAX_RUNNING_RUNS_PER_USER - runningCount);
@@ -501,7 +515,7 @@ async function tryStartQueuedRuns(userId: string) {
 async function dispatchUserRuns(userId: string) {
   await tryStartQueuedRuns(userId);
   const runningRuns = await getRunningRunsByUser(userId, MAX_RUNNING_RUNS_PER_USER);
-  await Promise.all(runningRuns.map((run) => processRunTick(run)));
+  await Promise.all(runningRuns.map((run) => processRunTickWithLock(run)));
 }
 
 export async function createRun(userId: string, pairs: UrlPair[]): Promise<RunRecord> {

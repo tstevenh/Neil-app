@@ -728,12 +728,36 @@ export default function Home() {
                           <p className="font-semibold text-[#101828]">Production</p>
                           <p>Provider: {selectedRun.discoveryDiagnostics.production.provider}</p>
                           <p>Discovered paths: {selectedRun.discoveryDiagnostics.production.discoveredPaths}</p>
+                          <p>
+                            Apify run:{" "}
+                            {selectedRun.discoveryDiagnostics.production.apifyRunId
+                              ? selectedRun.discoveryDiagnostics.production.apifyRunId
+                              : "—"}
+                          </p>
+                          <p>
+                            Apify dataset:{" "}
+                            {selectedRun.discoveryDiagnostics.production.apifyDatasetId
+                              ? selectedRun.discoveryDiagnostics.production.apifyDatasetId
+                              : "—"}
+                          </p>
                           <p>Allowed hosts: {selectedRun.discoveryDiagnostics.production.allowedHosts.join(", ")}</p>
                         </div>
                         <div className="rounded-lg border border-[#d7e8ed] bg-white p-2">
                           <p className="font-semibold text-[#101828]">Staging</p>
                           <p>Provider: {selectedRun.discoveryDiagnostics.staging.provider}</p>
                           <p>Discovered paths: {selectedRun.discoveryDiagnostics.staging.discoveredPaths}</p>
+                          <p>
+                            Apify run:{" "}
+                            {selectedRun.discoveryDiagnostics.staging.apifyRunId
+                              ? selectedRun.discoveryDiagnostics.staging.apifyRunId
+                              : "—"}
+                          </p>
+                          <p>
+                            Apify dataset:{" "}
+                            {selectedRun.discoveryDiagnostics.staging.apifyDatasetId
+                              ? selectedRun.discoveryDiagnostics.staging.apifyDatasetId
+                              : "—"}
+                          </p>
                           <p>Allowed hosts: {selectedRun.discoveryDiagnostics.staging.allowedHosts.join(", ")}</p>
                         </div>
                       </div>

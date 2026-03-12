@@ -2,6 +2,7 @@ import axios from "axios";
 import { load } from "cheerio";
 import { fetchPage } from "@/lib/fetch-page";
 import {
+  APIFY_DISCOVERY_FALLBACK_TO_LOCAL,
   APIFY_MAX_CONCURRENCY,
   APIFY_USE_PROXY,
   MAX_DISCOVERY_PAGES_PER_SITE,
@@ -224,20 +225,29 @@ function buildApifyHeaders(token: string) {
 function describeApifyError(error: unknown) {
   if (axios.isAxiosError(error)) {
     const status = error.response?.status;
+    const responseData = error.response?.data;
+    let detail = "";
+    if (typeof responseData === "string" && responseData.trim()) {
+      detail = responseData.trim();
+    } else if (responseData && typeof responseData === "object") {
+      const typed = responseData as { error?: { type?: string; message?: string }; message?: string };
+      detail = typed.error?.message || typed.message || "";
+    }
+    const suffix = detail ? ` (${detail})` : "";
     if (status === 402) {
-      return "Apify billing limit reached. Top up credits or upgrade the Apify plan.";
+      return `Apify request failed with HTTP 402${suffix}`;
     }
     if (status === 401) {
-      return "Apify authentication failed. Check APIFY_API_TOKEN.";
+      return `Apify authentication failed${suffix}`;
     }
     if (status === 403) {
-      return "Apify request was forbidden. Check actor access and token permissions.";
+      return `Apify request was forbidden${suffix}`;
     }
     if (status === 429) {
-      return "Apify rate limit reached. Retry in a moment.";
+      return `Apify rate limit reached${suffix}`;
     }
     if (status) {
-      return `Apify request failed with HTTP ${status}`;
+      return `Apify request failed with HTTP ${status}${suffix}`;
     }
     return error.message || "Unknown Apify request error";
   }
@@ -256,6 +266,22 @@ function appendWarning(state: DiscoveryJobState, message: string) {
   if (state.warnings.length > 100) {
     state.warnings = state.warnings.slice(-100);
   }
+}
+
+function handleApifyFailure(state: DiscoveryJobState, side: SideKey, message: string) {
+  appendWarning(state, message);
+  const info = sideState(state, side);
+  if (APIFY_DISCOVERY_FALLBACK_TO_LOCAL) {
+    info.provider = "playwright";
+    if (!info.queue.includes("/")) {
+      info.queue.push("/");
+    }
+    return;
+  }
+
+  info.provider = "done";
+  info.apifyFinished = true;
+  appendWarning(state, `${side}: discovery stopped because local fallback is disabled`);
 }
 
 function sideState(state: DiscoveryJobState, side: SideKey): DiscoverySideState {
@@ -287,6 +313,41 @@ function maybeAddRedirectHostAlias(state: DiscoveryJobState, side: SideKey, cand
   if (addAllowedHost(info, candidateHost)) {
     appendWarning(state, `${side}: added redirect host alias ${normalizeHost(candidateHost)}`);
   }
+}
+
+function maybeStopStagingDiscoveryOnRootRedirect(
+  state: DiscoveryJobState,
+  side: SideKey,
+  redirectedHost: string,
+  redirectedPath: string,
+) {
+  if (side !== "staging") {
+    return false;
+  }
+
+  const info = sideState(state, side);
+  const normalizedHost = normalizeHost(redirectedHost);
+  const normalizedPath = normalizePathname(redirectedPath);
+  if (!normalizedHost || normalizedPath !== info.rootPath) {
+    return false;
+  }
+
+  if (isAllowedHost(info, normalizedHost)) {
+    return false;
+  }
+
+  const redirectsToProduction = isAllowedHost(state.production, normalizedHost);
+  if (!redirectsToProduction) {
+    return false;
+  }
+
+  info.provider = "done";
+  info.apifyFinished = true;
+  appendWarning(
+    state,
+    `staging: root URL redirects to production host ${normalizedHost}; stopping staging discovery and comparing mapped staging URLs only`,
+  );
+  return true;
 }
 
 function discoveredCountForSide(state: DiscoveryJobState, side: SideKey) {
@@ -367,11 +428,11 @@ async function startApifyRunIfNeeded(state: DiscoveryJobState, side: SideKey) {
     token = config.token;
     actorId = config.actorId;
   } catch (error) {
-    appendWarning(state, `${side}: apify unavailable (${error instanceof Error ? error.message : "Unknown"})`);
-    info.provider = "playwright";
-    if (!info.queue.includes("/")) {
-      info.queue.push("/");
-    }
+    handleApifyFailure(
+      state,
+      side,
+      `${side}: apify unavailable (${error instanceof Error ? error.message : "Unknown"})`,
+    );
     return;
   }
 
@@ -408,14 +469,11 @@ async function startApifyRunIfNeeded(state: DiscoveryJobState, side: SideKey) {
     info.apifyDatasetId = runResponse.data?.data?.defaultDatasetId ?? "";
     info.apifyFinished = false;
   } catch (error) {
-    appendWarning(
+    handleApifyFailure(
       state,
+      side,
       `${side}: apify actor run failed (${describeApifyError(error)})`,
     );
-    info.provider = "playwright";
-    if (!info.queue.includes("/")) {
-      info.queue.push("/");
-    }
   }
 }
 
@@ -434,10 +492,7 @@ async function pollApifySide(state: DiscoveryJobState, side: SideKey) {
   try {
     token = getApifyConfig().token;
   } catch {
-    info.provider = "playwright";
-    if (!info.queue.includes("/")) {
-      info.queue.push("/");
-    }
+    handleApifyFailure(state, side, `${side}: apify unavailable (Missing APIFY_API_TOKEN)`);
     return;
   }
 
@@ -481,6 +536,9 @@ async function pollApifySide(state: DiscoveryJobState, side: SideKey) {
           const parsed = new URL(itemUrl);
           const hostname = normalizeHost(parsed.hostname);
           const normalizedPath = normalizePathname(parsed.pathname);
+          if (maybeStopStagingDiscoveryOnRootRedirect(state, side, hostname, normalizedPath)) {
+            break;
+          }
           if (!isAllowedHost(info, hostname)) {
             const sideDiscoveredCount = discoveredCountForSide(state, side);
             const canPromoteAsRedirectAlias =
@@ -541,20 +599,13 @@ async function pollApifySide(state: DiscoveryJobState, side: SideKey) {
   info.apifyFinished = true;
 
   if (runStatus !== "SUCCEEDED") {
-    appendWarning(state, `${side}: apify run ended with status ${runStatus}`);
-    info.provider = "playwright";
-    if (!info.queue.includes("/")) {
-      info.queue.push("/");
-    }
+    handleApifyFailure(state, side, `${side}: apify run ended with status ${runStatus}`);
     return;
   }
 
   const sideCount = discoveredCountForSide(state, side);
   if (sideCount <= 1 && canDiscoverMoreForSide(state, side)) {
-    info.provider = "playwright";
-    if (!info.queue.includes("/")) {
-      info.queue.push("/");
-    }
+    handleApifyFailure(state, side, `${side}: apify run returned too few URLs`);
     return;
   }
 
@@ -596,6 +647,9 @@ async function processPlaywrightSideTick(state: DiscoveryJobState, side: SideKey
         strategy: "local-only",
       });
       const final = new URL(page.finalUrl);
+      if (maybeStopStagingDiscoveryOnRootRedirect(state, side, final.hostname, final.pathname)) {
+        break;
+      }
       maybeAddRedirectHostAlias(state, side, final.hostname);
       if (!isAllowedHost(info, final.hostname)) {
         continue;
@@ -719,8 +773,12 @@ export function createDiscoveryJobState(input: CreateDiscoveryStateInput): Disco
 
 export async function runDiscoveryTick(state: DiscoveryJobState): Promise<DiscoveryJobState> {
   await pollApifySide(state, "production");
-  await pollApifySide(state, "staging");
   await processPlaywrightSideTick(state, "production");
+  if (state.production.provider !== "done") {
+    return state;
+  }
+
+  await pollApifySide(state, "staging");
   await processPlaywrightSideTick(state, "staging");
   return state;
 }

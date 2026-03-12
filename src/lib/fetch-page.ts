@@ -18,9 +18,13 @@ type PageData = {
   finalUrl: string;
   title: string;
   description: string;
+  descriptionSource: "meta:description" | "none";
+  metadataRenderer: "apify" | "static" | "playwright";
   html: string;
   usedRenderer: "apify" | "static" | "playwright";
 };
+
+type DescriptionSource = PageData["descriptionSource"];
 
 type FetchStrategy = "apify-first" | "local-only";
 
@@ -73,18 +77,67 @@ function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function parseFromHtml(requestedUrl: string, finalUrl: string, html: string, usedRenderer: PageData["usedRenderer"]): PageData {
+function extractMetaDescription($: ReturnType<typeof load>): { content: string; source: DescriptionSource } {
+  const selectors = [
+    { selector: "meta[name='description']", source: "meta:description" as const },
+    { selector: "meta[name='Description']", source: "meta:description" as const },
+    { selector: "meta[name='DESCRIPTION']", source: "meta:description" as const },
+  ];
+
+  for (const entry of selectors) {
+    const content = $(entry.selector).first().attr("content")?.trim();
+    if (content) {
+      return { content, source: entry.source };
+    }
+  }
+
+  // Case-insensitive fallback for unusual markup
+  const metaTags = $("meta").toArray();
+  for (const tag of metaTags) {
+    const $tag = $(tag);
+    const name = ($tag.attr("name") || $tag.attr("property") || "").trim().toLowerCase();
+    if (name === "description") {
+      const content = $tag.attr("content")?.trim();
+      if (content) {
+        return { content, source: "meta:description" };
+      }
+    }
+  }
+
+  return { content: "", source: "none" as const };
+}
+
+function parseFromHtml(
+  requestedUrl: string,
+  finalUrl: string,
+  html: string,
+  usedRenderer: PageData["usedRenderer"],
+): PageData {
   const $ = load(html);
   const title = normalizeMetaText($("title").first().text());
-  const description = normalizeMetaText($("meta[name='description']").first().attr("content") ?? "");
+  const extractedDescription = extractMetaDescription($);
+  const description = normalizeMetaText(extractedDescription.content);
 
   return {
     requestedUrl,
     finalUrl,
     title,
     description,
+    descriptionSource: description ? extractedDescription.source : "none",
+    metadataRenderer: usedRenderer,
     html,
     usedRenderer,
+  };
+}
+
+function mergePageMetadata(primary: PageData, secondary: PageData): PageData {
+  return {
+    ...primary,
+    finalUrl: primary.finalUrl || secondary.finalUrl,
+    title: primary.title || secondary.title,
+    description: primary.description || secondary.description,
+    descriptionSource: primary.description ? primary.descriptionSource : secondary.descriptionSource,
+    metadataRenderer: primary.description ? primary.metadataRenderer : secondary.metadataRenderer,
   };
 }
 
@@ -218,7 +271,17 @@ async function tryApify(url: string, options: FetchPageOptions): Promise<PageDat
     }
 
     const finalUrl = item.loadedUrl ?? item.crawl?.loadedUrl ?? item.url ?? url;
-    return parseFromHtml(url, finalUrl, html, "apify");
+    const apifyPage = parseFromHtml(url, finalUrl, html, "apify");
+    if (apifyPage.title && apifyPage.description) {
+      return apifyPage;
+    }
+
+    try {
+      const staticPage = await tryStatic(finalUrl, options);
+      return mergePageMetadata(apifyPage, staticPage);
+    } catch {
+      return apifyPage;
+    }
   } catch (error) {
     throw new Error(describeApifyError(error));
   }
