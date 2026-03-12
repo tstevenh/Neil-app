@@ -667,17 +667,12 @@ export async function getRunById(id: string) {
   }
 
   const typedRun = run as RunRow;
-  await dispatchUserRuns(typedRun.user_id);
-
-  const refreshedRun = await getRunRowById(typedRun.id);
-  if (!refreshedRun) {
-    return null;
-  }
+  void dispatchUserRuns(typedRun.user_id);
 
   const results = await getRunResults(id);
   let discoveryDiagnostics: RunRecord["discoveryDiagnostics"] | undefined;
-  if (getRunMode(refreshedRun) === "discover_stream") {
-    const discoveryJob = await readDiscoveryJob(refreshedRun.id);
+  if (getRunMode(typedRun) === "discover_stream") {
+    const discoveryJob = await readDiscoveryJob(typedRun.id);
     if (discoveryJob?.state && typeof discoveryJob.state === "object") {
       discoveryDiagnostics = getDiscoveryDiagnostics(
         discoveryJob.state as ReturnType<typeof createDiscoveryJobState>,
@@ -685,11 +680,11 @@ export async function getRunById(id: string) {
     }
   }
 
-  return mapRun(refreshedRun, results, discoveryDiagnostics);
+  return mapRun(typedRun, results, discoveryDiagnostics);
 }
 
 export async function getRunsByUser(userId: string) {
-  await dispatchUserRuns(userId);
+  void dispatchUserRuns(userId);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabaseAdmin = getSupabaseAdmin() as any;
