@@ -108,11 +108,6 @@ function extractEmbeddedCmsDescription(html: string): { content: string; source:
 function extractDescriptionFromApifyMetadata(
   metadata: ApifyDatasetItem["metadata"],
 ): { content: string; source: DescriptionSource } {
-  const directDescription = normalizeMetaText(metadata?.description);
-  if (directDescription) {
-    return { content: directDescription, source: "apify:metadata.description" };
-  }
-
   const openGraphDescription = normalizeMetaText(
     (metadata?.openGraph ?? []).find((entry) => (entry?.property ?? "").trim().toLowerCase() === "og:description")
       ?.content,
@@ -128,6 +123,11 @@ function extractDescriptionFromApifyMetadata(
   );
   if (jsonLdDescription) {
     return { content: jsonLdDescription, source: "apify:metadata.jsonLd" };
+  }
+
+  const directDescription = normalizeMetaText(metadata?.description);
+  if (directDescription) {
+    return { content: directDescription, source: "apify:metadata.description" };
   }
 
   return { content: "", source: "none" };
@@ -213,12 +213,23 @@ export function parsePageDataFromApifyItem(
   const htmlPage = parseFromHtml(requestedUrl, finalUrl, html, "apify");
   const metadataTitle = normalizeMetaText(item.metadata?.title);
   const metadataDescription = extractDescriptionFromApifyMetadata(item.metadata);
+  const htmlMetaDescription = htmlPage.descriptionSource === "meta:description" ? htmlPage.description : "";
+  const embeddedDescription =
+    htmlPage.descriptionSource === "embedded:site_info.description" ? htmlPage.description : "";
+  const description = htmlMetaDescription || metadataDescription.content || embeddedDescription;
+  const descriptionSource = htmlMetaDescription
+    ? htmlPage.descriptionSource
+    : metadataDescription.content
+      ? metadataDescription.source
+      : embeddedDescription
+        ? htmlPage.descriptionSource
+        : "none";
 
   return {
     ...htmlPage,
     title: htmlPage.title || metadataTitle,
-    description: htmlPage.description || metadataDescription.content,
-    descriptionSource: htmlPage.description ? htmlPage.descriptionSource : metadataDescription.source,
+    description,
+    descriptionSource,
   };
 }
 

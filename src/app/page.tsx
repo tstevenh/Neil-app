@@ -7,7 +7,8 @@ import type { RunRecord } from "@/lib/types";
 import { getBrowserSession, getSupabaseBrowser, refreshBrowserSession } from "@/lib/supabase-browser";
 
 const RUN_LABELS_STORAGE_KEY = "qa-run-source-labels";
-const RUNS_POLL_INTERVAL_MS = 5_000;
+const ACTIVE_RUNS_POLL_INTERVAL_MS = 8_000;
+const IDLE_RUNS_POLL_INTERVAL_MS = 15_000;
 
 type ApiBody = Record<string, unknown>;
 
@@ -33,7 +34,7 @@ export default function Home() {
   const [runSourceLabels, setRunSourceLabels] = useState<Record<string, string>>({});
   const [cancelingRunIds, setCancelingRunIds] = useState<Record<string, boolean>>({});
   const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
-  const refreshRunsInFlight = useRef(false);
+  const runsPollInFlight = useRef(false);
 
   async function getCurrentAccessToken() {
     let sessionResult;
@@ -133,11 +134,11 @@ export default function Home() {
   }
 
   async function refreshRuns() {
-    if (!token || refreshRunsInFlight.current) {
+    if (!token || runsPollInFlight.current) {
       return;
     }
 
-    refreshRunsInFlight.current = true;
+    runsPollInFlight.current = true;
     try {
       const response = await apiFetch("/api/runs");
       const data = await readApiBody(response);
@@ -155,7 +156,36 @@ export default function Home() {
       }
       setMessage(messageText);
     } finally {
-      refreshRunsInFlight.current = false;
+      runsPollInFlight.current = false;
+    }
+  }
+
+  async function tickActiveRuns() {
+    if (!token || runsPollInFlight.current) {
+      return;
+    }
+
+    runsPollInFlight.current = true;
+    try {
+      const response = await apiFetch("/api/runs/tick", {
+        method: "POST",
+      });
+      const data = await readApiBody(response);
+      if (!response.ok) {
+        setMessage(typeof data.error === "string" ? data.error : "Failed to refresh active runs");
+        return;
+      }
+
+      setRuns(Array.isArray(data.runs) ? (data.runs as RunRecord[]) : []);
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : "Failed to refresh active runs";
+      if (messageText.toLowerCase().includes("session expired")) {
+        setToken(null);
+        setRuns([]);
+      }
+      setMessage(messageText);
+    } finally {
+      runsPollInFlight.current = false;
     }
   }
 
@@ -469,17 +499,29 @@ export default function Home() {
     }
 
     void refreshRuns();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
 
+  useEffect(() => {
+    if (!token) {
+      return;
+    }
+
+    const hasActiveRuns = runs.some((run) => run.status === "queued" || run.status === "running");
     const interval = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") {
         return;
       }
+      if (hasActiveRuns) {
+        void tickActiveRuns();
+        return;
+      }
       void refreshRuns();
-    }, RUNS_POLL_INTERVAL_MS);
+    }, hasActiveRuns ? ACTIVE_RUNS_POLL_INTERVAL_MS : IDLE_RUNS_POLL_INTERVAL_MS);
 
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+  }, [token, runs]);
 
   useEffect(() => {
     if (!isAuthLoading && !token) {

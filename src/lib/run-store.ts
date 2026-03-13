@@ -623,6 +623,11 @@ async function dispatchUserRuns(userId: string) {
   await Promise.all(runningRuns.map((run) => processRunTickWithLock(run)));
 }
 
+export async function tickRunsByUser(userId: string) {
+  await dispatchUserRuns(userId);
+  return getRunsByUser(userId);
+}
+
 export async function createRun(userId: string, pairs: UrlPair[]): Promise<RunRecord> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabaseAdmin = getSupabaseAdmin() as any;
@@ -779,7 +784,6 @@ export async function getRunById(id: string) {
   }
 
   const typedRun = run as RunRow;
-  void dispatchUserRuns(typedRun.user_id);
 
   const results = await getRunResults(id);
   let discoveryDiagnostics: RunRecord["discoveryDiagnostics"] | undefined;
@@ -796,8 +800,6 @@ export async function getRunById(id: string) {
 }
 
 export async function getRunsByUser(userId: string) {
-  void dispatchUserRuns(userId);
-
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabaseAdmin = getSupabaseAdmin() as any;
   const { data: runs, error } = await supabaseAdmin
