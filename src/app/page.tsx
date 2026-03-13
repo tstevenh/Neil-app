@@ -533,7 +533,7 @@ export default function Home() {
           <div className="rounded-2xl border border-[#d8ebef] bg-[#e3faff] p-4 md:col-span-2">
             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#234167]">Step 1</p>
             <p className="mt-1 text-sm font-medium text-[#101828]">
-              Add one URL pair, upload CSV, or run homepage crawl compare.
+              Run a homepage crawl compare from production and staging roots.
             </p>
           </div>
           <div className="rounded-2xl border border-[#d8ebef] bg-white p-4">
@@ -553,42 +553,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className={`grid min-w-0 gap-4 p-6 md:grid-cols-3 ${cardClass}`}>
-          <div className="min-w-0 space-y-3 rounded-2xl border border-[#deedf1] bg-white p-4">
-            <h2 className="text-xl font-medium text-[#101828]">Single Compare</h2>
-            <input
-              className="w-full rounded-xl border border-[#d2e6ea] bg-white px-4 py-2.5 text-sm outline-none transition focus:border-[#6cc8dd]"
-              placeholder="Production URL"
-              value={productionUrl}
-              onChange={(event) => setProductionUrl(event.target.value)}
-            />
-            <input
-              className="w-full rounded-xl border border-[#d2e6ea] bg-white px-4 py-2.5 text-sm outline-none transition focus:border-[#6cc8dd]"
-              placeholder="Staging URL"
-              value={stagingUrl}
-              onChange={(event) => setStagingUrl(event.target.value)}
-            />
-            <button type="button" className={primaryButtonClass} onClick={startSingleCompare}>
-              Run Check
-            </button>
-          </div>
-
-          <div className="min-w-0 space-y-3 rounded-2xl border border-[#deedf1] bg-white p-4">
-            <h2 className="text-xl font-medium text-[#101828]">Bulk Upload (CSV)</h2>
-            <p className="text-xs text-[#5a6a74]">
-              Supports: `production_url/staging_url` or `Production URL/Staging URL`. Max 150 rows.
-            </p>
-            <input
-              type="file"
-              accept=".csv"
-              className="block w-full max-w-full text-sm text-[#234167] file:mr-3 file:rounded-full file:border file:border-[#d4e5ea] file:bg-white file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-[#234167] file:transition file:hover:bg-[#f3fbfd]"
-              onChange={(event) => setBulkFile(event.target.files?.[0] ?? null)}
-            />
-            <button type="button" className={primaryButtonClass} onClick={startBulkCompare}>
-              Run Bulk Check
-            </button>
-          </div>
-
+        <section className={`grid min-w-0 gap-4 p-6 md:grid-cols-1 ${cardClass}`}>
           <div className="min-w-0 space-y-3 rounded-2xl border border-[#deedf1] bg-white p-4">
             <h2 className="text-xl font-medium text-[#101828]">Homepage Crawl Compare</h2>
             <p className="text-xs text-[#5a6a74]">

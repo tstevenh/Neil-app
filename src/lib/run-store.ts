@@ -23,6 +23,8 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 const PROCESS_ROWS_PER_TICK = 1;
 type RunMode = "standard" | "discover_stream";
 const activeRunTicks = new Set<string>();
+const DISCOVERY_JOB_READ_RETRY_COUNT = 3;
+const DISCOVERY_JOB_READ_RETRY_DELAY_MS = 750;
 
 type RunRow = {
   id: string;
@@ -54,6 +56,11 @@ type DiscoveryJobRow = {
   state: unknown;
   lock_version: number;
 };
+
+type DiscoveryJobReadResult =
+  | { kind: "ok"; job: DiscoveryJobRow }
+  | { kind: "missing" }
+  | { kind: "error"; message: string };
 
 function mapRun(
   row: RunRow,
@@ -311,7 +318,7 @@ async function readRunInputRow(runId: string, rowIndex: number): Promise<RunInpu
   return data as RunInputRow;
 }
 
-async function readDiscoveryJob(runId: string): Promise<DiscoveryJobRow | null> {
+async function readDiscoveryJob(runId: string): Promise<DiscoveryJobReadResult> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabaseAdmin = getSupabaseAdmin() as any;
   const { data, error } = await supabaseAdmin
@@ -320,11 +327,41 @@ async function readDiscoveryJob(runId: string): Promise<DiscoveryJobRow | null> 
     .eq("run_id", runId)
     .single();
 
-  if (error || !data) {
-    return null;
+  if (error) {
+    const details = `${error.code ?? ""} ${error.message ?? ""}`.trim().toLowerCase();
+    if (
+      details.includes("0 rows") ||
+      details.includes("no rows") ||
+      details.includes("json object requested") ||
+      details.includes("pgrst116")
+    ) {
+      return { kind: "missing" };
+    }
+    return { kind: "error", message: error.message ?? "Unknown discovery job read error" };
   }
 
-  return data as DiscoveryJobRow;
+  if (!data) {
+    return { kind: "missing" };
+  }
+
+  return { kind: "ok", job: data as DiscoveryJobRow };
+}
+
+async function readDiscoveryJobWithRetry(runId: string): Promise<DiscoveryJobReadResult> {
+  let lastResult: DiscoveryJobReadResult = { kind: "missing" };
+
+  for (let attempt = 0; attempt <= DISCOVERY_JOB_READ_RETRY_COUNT; attempt += 1) {
+    lastResult = await readDiscoveryJob(runId);
+    if (lastResult.kind === "ok") {
+      return lastResult;
+    }
+    if (attempt >= DISCOVERY_JOB_READ_RETRY_COUNT) {
+      break;
+    }
+    await delay(DISCOVERY_JOB_READ_RETRY_DELAY_MS * (attempt + 1));
+  }
+
+  return lastResult;
 }
 
 async function insertDiscoveryJob(runId: string, state: unknown) {
@@ -466,12 +503,18 @@ async function processDiscoveryRunTick(run: RunRow) {
     return;
   }
 
-  const discoveryJob = await readDiscoveryJob(run.id);
-  if (!discoveryJob) {
-    const nextErrors = [...latest.errors, "Missing discovery job state"];
+  const discoveryJobResult = await readDiscoveryJobWithRetry(run.id);
+  if (discoveryJobResult.kind !== "ok") {
+    const nextErrors = [
+      ...latest.errors,
+      discoveryJobResult.kind === "error"
+        ? `Discovery job read failed: ${discoveryJobResult.message}`
+        : "Missing discovery job state",
+    ];
     await updateRun(latest.id, { status: "failed", errors: nextErrors });
     return;
   }
+  const discoveryJob = discoveryJobResult.job;
 
   // Discovery state is persisted as JSON in Supabase.
   const state = discoveryJob.state as ReturnType<typeof createDiscoveryJobState>;
@@ -681,9 +724,9 @@ export async function cancelRun(userId: string, id: string) {
   nextErrors.push(`Canceled by user at ${new Date().toISOString()}`);
 
   if (getRunMode(run) === "discover_stream") {
-    const discoveryJob = await readDiscoveryJob(id);
-    if (discoveryJob?.state && typeof discoveryJob.state === "object") {
-      await abortDiscoveryApifyRuns(discoveryJob.state as ReturnType<typeof createDiscoveryJobState>);
+    const discoveryJob = await readDiscoveryJobWithRetry(id);
+    if (discoveryJob.kind === "ok" && discoveryJob.job.state && typeof discoveryJob.job.state === "object") {
+      await abortDiscoveryApifyRuns(discoveryJob.job.state as ReturnType<typeof createDiscoveryJobState>);
     }
   }
 
@@ -741,10 +784,10 @@ export async function getRunById(id: string) {
   const results = await getRunResults(id);
   let discoveryDiagnostics: RunRecord["discoveryDiagnostics"] | undefined;
   if (getRunMode(typedRun) === "discover_stream") {
-    const discoveryJob = await readDiscoveryJob(typedRun.id);
-    if (discoveryJob?.state && typeof discoveryJob.state === "object") {
+    const discoveryJob = await readDiscoveryJobWithRetry(typedRun.id);
+    if (discoveryJob.kind === "ok" && discoveryJob.job.state && typeof discoveryJob.job.state === "object") {
       discoveryDiagnostics = getDiscoveryDiagnostics(
-        discoveryJob.state as ReturnType<typeof createDiscoveryJobState>,
+        discoveryJob.job.state as ReturnType<typeof createDiscoveryJobState>,
       );
     }
   }
