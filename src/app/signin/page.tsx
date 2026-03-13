@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import Image from "next/image";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
 
@@ -15,8 +14,6 @@ export default function SignInPage() {
 
   const primaryButtonClass =
     "rounded-full bg-[#234167] px-5 py-2.5 text-sm font-medium text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-60";
-  const secondaryButtonClass =
-    "rounded-full border border-[#d4e5ea] bg-white px-5 py-2.5 text-sm font-medium text-[#234167] transition hover:bg-[#f3fbfd]";
   const cardClass = "rounded-[24px] border border-[#dce8ec] bg-white shadow-[0_14px_35px_-24px_rgba(0,0,0,0.45)]";
 
   useEffect(() => {
@@ -75,9 +72,6 @@ export default function SignInPage() {
         <button type="button" className={primaryButtonClass} onClick={signIn} disabled={loading}>
           {loading ? "Signing In..." : "Sign In"}
         </button>
-        <Link href="/signup" className={secondaryButtonClass}>
-          Go to Sign Up
-        </Link>
         {message ? <p className="text-sm text-[#5a6a74]">{message}</p> : null}
       </div>
     </main>

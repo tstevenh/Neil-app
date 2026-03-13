@@ -1,6 +1,6 @@
 import axios from "axios";
 import { load } from "cheerio";
-import { fetchPage } from "@/lib/fetch-page";
+import { fetchPage, hasCompletePageMetadata, repairIncompletePageData } from "@/lib/fetch-page";
 import {
   BLOCKED_RETRY_COUNT,
   BLOCKED_RETRY_DELAY_MS,
@@ -68,9 +68,16 @@ async function resolveComparePage(
   options: { cookieHeader?: string; useApifyProxy?: boolean },
 ) {
   if (prefetchedPage) {
+    const repairedPage = hasCompletePageMetadata(prefetchedPage)
+      ? prefetchedPage
+      : await repairIncompletePageData(prefetchedPage, {
+          cookieHeader: options.cookieHeader,
+          strategy: "static-only",
+          useApifyProxy: options.useApifyProxy,
+        });
     return {
-      page: prefetchedPage,
-      blocked: looksBlocked(prefetchedPage.title, prefetchedPage.html),
+      page: repairedPage,
+      blocked: looksBlocked(repairedPage.title, repairedPage.html),
       attempts: 0,
     };
   }

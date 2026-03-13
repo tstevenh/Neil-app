@@ -1,6 +1,11 @@
 import axios from "axios";
 import { load } from "cheerio";
-import { fetchPage, parsePageDataFromHtml } from "@/lib/fetch-page";
+import {
+  fetchPage,
+  hasCompletePageMetadata,
+  parsePageDataFromHtml,
+  repairIncompletePageData,
+} from "@/lib/fetch-page";
 import {
   APIFY_DISCOVERY_FALLBACK_TO_LOCAL,
   APIFY_MAX_CONCURRENCY,
@@ -491,6 +496,28 @@ function setCachedSnapshot(
   cacheForSide(state, side)[pathKey] = snapshot;
 }
 
+async function buildDiscoverySnapshot(
+  requestedUrl: string,
+  snapshot: DiscoveryPageSnapshot,
+  options: { cookieHeader?: string; useApifyProxy?: boolean },
+) {
+  if (hasCompletePageMetadata(snapshot)) {
+    return snapshot;
+  }
+
+  return repairIncompletePageData(
+    {
+      ...snapshot,
+      requestedUrl,
+    },
+    {
+      cookieHeader: options.cookieHeader,
+      strategy: "static-only",
+      useApifyProxy: options.useApifyProxy,
+    },
+  );
+}
+
 function extractHtmlFromApifyItem(item: unknown): string {
   if (!item || typeof item !== "object") {
     return "";
@@ -702,11 +729,15 @@ async function pollApifySide(state: DiscoveryJobState, side: SideKey) {
           const html = extractHtmlFromApifyItem(item);
           if (html.trim()) {
             const requestedUrl = toAbsolutePathUrl(info.origin, pathKey);
+            const snapshot = parsePageDataFromHtml(requestedUrl, parsed.toString(), html, "apify");
             setCachedSnapshot(
               state,
               side,
               pathKey,
-              parsePageDataFromHtml(requestedUrl, parsed.toString(), html, "apify"),
+              await buildDiscoverySnapshot(requestedUrl, snapshot, {
+                cookieHeader: info.cookieHeader,
+                useApifyProxy: state.useApifyProxy,
+              }),
             );
           }
         } catch {
@@ -815,16 +846,28 @@ async function processStaticSideTick(state: DiscoveryJobState, side: SideKey) {
         continue;
       }
       updatePathForSide(state, side, finalPath);
-      setCachedSnapshot(state, side, finalPath, {
-        requestedUrl: targetUrl,
-        finalUrl: page.finalUrl,
-        title: page.title,
-        description: page.description,
-        descriptionSource: page.descriptionSource,
-        metadataRenderer: page.metadataRenderer,
-        html: page.html,
-        usedRenderer: page.usedRenderer,
-      });
+      setCachedSnapshot(
+        state,
+        side,
+        finalPath,
+        await buildDiscoverySnapshot(
+          targetUrl,
+          {
+            requestedUrl: targetUrl,
+            finalUrl: page.finalUrl,
+            title: page.title,
+            description: page.description,
+            descriptionSource: page.descriptionSource,
+            metadataRenderer: page.metadataRenderer,
+            html: page.html,
+            usedRenderer: page.usedRenderer,
+          },
+          {
+            cookieHeader: info.cookieHeader,
+            useApifyProxy: state.useApifyProxy,
+          },
+        ),
+      );
 
       const $ = load(page.html);
       const hrefs = $("a[href]")

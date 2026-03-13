@@ -53,6 +53,10 @@ const DEFAULT_BROWSER_USER_AGENT =
   process.env.DEFAULT_BROWSER_USER_AGENT?.trim() ||
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
+function hasText(value: string | undefined | null) {
+  return normalizeMetaText(value).length > 0;
+}
+
 function extractMetaDescription($: ReturnType<typeof load>): { content: string; source: DescriptionSource } {
   const selectors = [
     { selector: "meta[name='description']", source: "meta:description" as const },
@@ -124,6 +128,10 @@ function mergePageMetadata(primary: PageData, secondary: PageData): PageData {
     descriptionSource: primary.description ? primary.descriptionSource : secondary.descriptionSource,
     metadataRenderer: primary.description ? primary.metadataRenderer : secondary.metadataRenderer,
   };
+}
+
+export function hasCompletePageMetadata(page: Pick<PageData, "title" | "description"> | null | undefined) {
+  return hasText(page?.title) && hasText(page?.description);
 }
 
 function normalizeApifyActorIdentifier(value: string) {
@@ -296,6 +304,36 @@ async function tryStatic(url: string, options: FetchPageOptions): Promise<PageDa
       throw new Error(error.message || "Axios request failed");
     }
     throw new Error(error instanceof Error ? error.message : "Unknown static fetch error");
+  }
+}
+
+export async function repairIncompletePageData(page: PageData, options: FetchPageOptions = {}): Promise<PageData> {
+  if (hasCompletePageMetadata(page)) {
+    return page;
+  }
+
+  const targetUrl = page.finalUrl || page.requestedUrl;
+
+  try {
+    const staticPage = await tryStatic(targetUrl, options);
+    const merged = mergePageMetadata(page, staticPage);
+    if (hasCompletePageMetadata(merged)) {
+      return merged;
+    }
+    page = merged;
+  } catch {
+    // Keep the original snapshot if the lightweight repair fetch fails.
+  }
+
+  if (!APIFY_COMPARE_FETCH_ENABLED) {
+    return page;
+  }
+
+  try {
+    const apifyPage = await tryApify(targetUrl, options);
+    return mergePageMetadata(page, apifyPage);
+  } catch {
+    return page;
   }
 }
 
