@@ -1,12 +1,13 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import type { RunRecord } from "@/lib/types";
-import { getSupabaseBrowser } from "@/lib/supabase-browser";
+import { getBrowserSession, getSupabaseBrowser, refreshBrowserSession } from "@/lib/supabase-browser";
 
 const RUN_LABELS_STORAGE_KEY = "qa-run-source-labels";
+const RUNS_POLL_INTERVAL_MS = 5_000;
 
 type ApiBody = Record<string, unknown>;
 
@@ -32,11 +33,21 @@ export default function Home() {
   const [runSourceLabels, setRunSourceLabels] = useState<Record<string, string>>({});
   const [cancelingRunIds, setCancelingRunIds] = useState<Record<string, boolean>>({});
   const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
+  const refreshRunsInFlight = useRef(false);
 
   async function getCurrentAccessToken() {
-    const supabase = getSupabaseBrowser();
-    const { data, error } = await supabase.auth.getSession();
+    let sessionResult;
+    try {
+      sessionResult = await getBrowserSession();
+    } catch {
+      const supabase = getSupabaseBrowser();
+      await supabase.auth.signOut();
+      setToken(null);
+      return null;
+    }
+    const { data, error } = sessionResult;
     if (error) {
+      const supabase = getSupabaseBrowser();
       await supabase.auth.signOut();
       setToken(null);
       return null;
@@ -66,7 +77,17 @@ export default function Home() {
 
     if (response.status === 401) {
       const supabase = getSupabaseBrowser();
-      const { data, error } = await supabase.auth.refreshSession();
+      let refreshResult;
+      try {
+        refreshResult = await refreshBrowserSession();
+      } catch {
+        await supabase.auth.signOut();
+        setToken(null);
+        router.replace("/signin");
+        throw new Error("Session refresh failed. Please sign in again.");
+      }
+
+      const { data, error } = refreshResult;
       if (error) {
         await supabase.auth.signOut();
         setToken(null);
@@ -112,10 +133,11 @@ export default function Home() {
   }
 
   async function refreshRuns() {
-    if (!token) {
+    if (!token || refreshRunsInFlight.current) {
       return;
     }
 
+    refreshRunsInFlight.current = true;
     try {
       const response = await apiFetch("/api/runs");
       const data = await readApiBody(response);
@@ -132,6 +154,8 @@ export default function Home() {
         setRuns([]);
       }
       setMessage(messageText);
+    } finally {
+      refreshRunsInFlight.current = false;
     }
   }
 
@@ -402,7 +426,16 @@ export default function Home() {
         }
 
         const supabase = getSupabaseBrowser();
-        const { data, error } = await supabase.auth.getSession();
+        let sessionResult;
+        try {
+          sessionResult = await getBrowserSession();
+        } catch (error) {
+          setToken(null);
+          setMessage(error instanceof Error ? error.message : "Failed to initialize session");
+          return;
+        }
+
+        const { data, error } = sessionResult;
         if (error) {
           await supabase.auth.signOut();
           setToken(null);
@@ -438,8 +471,11 @@ export default function Home() {
     void refreshRuns();
 
     const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+        return;
+      }
       void refreshRuns();
-    }, 2500);
+    }, RUNS_POLL_INTERVAL_MS);
 
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -17,7 +17,13 @@ type PageData = {
   finalUrl: string;
   title: string;
   description: string;
-  descriptionSource: "meta:description" | "embedded:site_info.description" | "none";
+  descriptionSource:
+    | "meta:description"
+    | "embedded:site_info.description"
+    | "apify:metadata.description"
+    | "apify:metadata.openGraph"
+    | "apify:metadata.jsonLd"
+    | "none";
   metadataRenderer: "apify" | "static";
   html: string;
   usedRenderer: "apify" | "static";
@@ -40,10 +46,20 @@ type ApifyCookie = {
   path?: string;
 };
 
-type ApifyDatasetItem = {
+export type ApifyDatasetItem = {
   url?: string;
   loadedUrl?: string;
   html?: string;
+  metadata?: {
+    canonicalUrl?: string | null;
+    title?: string | null;
+    description?: string | null;
+    openGraph?: Array<{
+      property?: string | null;
+      content?: string | null;
+    }> | null;
+    jsonLd?: Array<Record<string, unknown>> | null;
+  } | null;
   crawl?: {
     loadedUrl?: string;
   };
@@ -84,6 +100,34 @@ function extractEmbeddedCmsDescription(html: string): { content: string; source:
     if (content) {
       return { content, source: "embedded:site_info.description" };
     }
+  }
+
+  return { content: "", source: "none" };
+}
+
+function extractDescriptionFromApifyMetadata(
+  metadata: ApifyDatasetItem["metadata"],
+): { content: string; source: DescriptionSource } {
+  const directDescription = normalizeMetaText(metadata?.description);
+  if (directDescription) {
+    return { content: directDescription, source: "apify:metadata.description" };
+  }
+
+  const openGraphDescription = normalizeMetaText(
+    (metadata?.openGraph ?? []).find((entry) => (entry?.property ?? "").trim().toLowerCase() === "og:description")
+      ?.content,
+  );
+  if (openGraphDescription) {
+    return { content: openGraphDescription, source: "apify:metadata.openGraph" };
+  }
+
+  const jsonLdDescription = normalizeMetaText(
+    (metadata?.jsonLd ?? []).find((entry) => typeof entry?.description === "string")?.description as
+      | string
+      | undefined,
+  );
+  if (jsonLdDescription) {
+    return { content: jsonLdDescription, source: "apify:metadata.jsonLd" };
   }
 
   return { content: "", source: "none" };
@@ -157,6 +201,25 @@ export function parsePageDataFromHtml(
   usedRenderer: PageData["usedRenderer"],
 ): PageData {
   return parseFromHtml(requestedUrl, finalUrl, html, usedRenderer);
+}
+
+export function parsePageDataFromApifyItem(
+  requestedUrl: string,
+  fallbackFinalUrl: string,
+  item: ApifyDatasetItem,
+): PageData {
+  const html = typeof item.html === "string" ? item.html : "";
+  const finalUrl = item.loadedUrl ?? item.crawl?.loadedUrl ?? item.url ?? fallbackFinalUrl;
+  const htmlPage = parseFromHtml(requestedUrl, finalUrl, html, "apify");
+  const metadataTitle = normalizeMetaText(item.metadata?.title);
+  const metadataDescription = extractDescriptionFromApifyMetadata(item.metadata);
+
+  return {
+    ...htmlPage,
+    title: htmlPage.title || metadataTitle,
+    description: htmlPage.description || metadataDescription.content,
+    descriptionSource: htmlPage.description ? htmlPage.descriptionSource : metadataDescription.source,
+  };
 }
 
 function mergePageMetadata(primary: PageData, secondary: PageData): PageData {
@@ -299,12 +362,12 @@ async function tryApify(url: string, options: FetchPageOptions): Promise<PageDat
     }
 
     const html = typeof item.html === "string" ? item.html : "";
-    if (!html.trim()) {
-      throw new Error("Apify compare fetch returned no HTML");
+    if (!html.trim() && !hasText(item.metadata?.title) && !hasText(item.metadata?.description)) {
+      throw new Error("Apify compare fetch returned no HTML or metadata");
     }
 
     const finalUrl = item.loadedUrl ?? item.crawl?.loadedUrl ?? item.url ?? url;
-    const apifyPage = parseFromHtml(url, finalUrl, html, "apify");
+    const apifyPage = parsePageDataFromApifyItem(url, finalUrl, item);
     if (apifyPage.title && apifyPage.description) {
       return apifyPage;
     }

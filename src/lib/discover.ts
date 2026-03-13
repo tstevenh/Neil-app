@@ -1,8 +1,10 @@
 import axios from "axios";
 import { load } from "cheerio";
 import {
+  type ApifyDatasetItem,
   fetchPage,
   hasCompletePageMetadata,
+  parsePageDataFromApifyItem,
   parsePageDataFromHtml,
   repairIncompletePageData,
 } from "@/lib/fetch-page";
@@ -729,7 +731,7 @@ async function pollApifySide(state: DiscoveryJobState, side: SideKey) {
           const html = extractHtmlFromApifyItem(item);
           if (html.trim()) {
             const requestedUrl = toAbsolutePathUrl(info.origin, pathKey);
-            const snapshot = parsePageDataFromHtml(requestedUrl, parsed.toString(), html, "apify");
+            const snapshot = parsePageDataFromApifyItem(requestedUrl, parsed.toString(), item as ApifyDatasetItem);
             setCachedSnapshot(
               state,
               side,

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getSupabaseBrowser } from "@/lib/supabase-browser";
+import { getBrowserSession, getSupabaseBrowser, signInWithBrowserPassword } from "@/lib/supabase-browser";
 
 export default function SignInPage() {
   const router = useRouter();
@@ -18,7 +18,14 @@ export default function SignInPage() {
   useEffect(() => {
     const bootstrap = async () => {
       const supabase = getSupabaseBrowser();
-      const { data, error } = await supabase.auth.getSession();
+      let sessionResult;
+      try {
+        sessionResult = await getBrowserSession();
+      } catch {
+        return;
+      }
+
+      const { data, error } = sessionResult;
       if (error) {
         await supabase.auth.signOut();
         return;
@@ -34,8 +41,7 @@ export default function SignInPage() {
     setLoading(true);
     setMessage("");
     try {
-      const supabase = getSupabaseBrowser();
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      const { error } = await signInWithBrowserPassword(email, password);
       if (error) {
         setMessage(error.message);
         return;
