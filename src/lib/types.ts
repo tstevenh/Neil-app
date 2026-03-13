@@ -42,7 +42,7 @@ export type DiscoveryPageSnapshot = {
   finalUrl: string;
   title: string;
   description: string;
-  descriptionSource: "meta:description" | "none";
+  descriptionSource: "meta:description" | "embedded:site_info.description" | "none";
   metadataRenderer: "apify" | "static";
   html: string;
   usedRenderer: "apify" | "static";

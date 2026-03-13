@@ -17,7 +17,7 @@ type PageData = {
   finalUrl: string;
   title: string;
   description: string;
-  descriptionSource: "meta:description" | "none";
+  descriptionSource: "meta:description" | "embedded:site_info.description" | "none";
   metadataRenderer: "apify" | "static";
   html: string;
   usedRenderer: "apify" | "static";
@@ -57,7 +57,42 @@ function hasText(value: string | undefined | null) {
   return normalizeMetaText(value).length > 0;
 }
 
-function extractMetaDescription($: ReturnType<typeof load>): { content: string; source: DescriptionSource } {
+function decodeHtmlEntities(value: string) {
+  const $ = load(`<textarea>${value}</textarea>`);
+  return $("textarea").text();
+}
+
+function extractEmbeddedCmsDescription(html: string): { content: string; source: DescriptionSource } {
+  const decodedHtml = decodeHtmlEntities(html);
+  const patterns = [
+    /"site_info"\s*:\s*\[\s*\{[\s\S]{0,5000}?"description"\s*:\s*"([^"]+)"/i,
+    /"site_info"\s*:\s*\{[\s\S]{0,5000}?"description"\s*:\s*"([^"]+)"/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = decodedHtml.match(pattern);
+    const content = normalizeMetaText(
+      decodeHtmlEntities(
+        (match?.[1] ?? "")
+          .replace(/\\"/g, '"')
+          .replace(/\\\//g, "/")
+          .replace(/\\n/g, " ")
+          .replace(/\\r/g, " ")
+          .replace(/\\t/g, " "),
+      ),
+    );
+    if (content) {
+      return { content, source: "embedded:site_info.description" };
+    }
+  }
+
+  return { content: "", source: "none" };
+}
+
+function extractMetaDescription(
+  $: ReturnType<typeof load>,
+  html: string,
+): { content: string; source: DescriptionSource } {
   const selectors = [
     { selector: "meta[name='description']", source: "meta:description" as const },
     { selector: "meta[name='Description']", source: "meta:description" as const },
@@ -84,7 +119,12 @@ function extractMetaDescription($: ReturnType<typeof load>): { content: string; 
     }
   }
 
-  return { content: "", source: "none" as const };
+  const embeddedDescription = extractEmbeddedCmsDescription(html);
+  if (embeddedDescription.content) {
+    return embeddedDescription;
+  }
+
+  return { content: "", source: "none" };
 }
 
 function parseFromHtml(
@@ -95,7 +135,7 @@ function parseFromHtml(
 ): PageData {
   const $ = load(html);
   const title = normalizeMetaText($("title").first().text());
-  const extractedDescription = extractMetaDescription($);
+  const extractedDescription = extractMetaDescription($, html);
   const description = normalizeMetaText(extractedDescription.content);
 
   return {
