@@ -518,7 +518,7 @@ export default function Home() {
       <div className="mx-auto min-w-0 max-w-7xl space-y-6">
         <header className={`flex flex-col gap-4 p-6 md:flex-row md:items-center md:justify-between ${cardClass}`}>
           <div className="space-y-2">
-            <Image src="/digirx-logo.svg" alt="DigiRX" width={144} height={50} />
+            <img src="/brand-logo" alt="DigiRX" width="144" height="50" className="h-auto w-36" />
             <h1 className="text-3xl font-medium text-[#101828] md:text-4xl">QA Workbench</h1>
             <p className="text-sm text-[#5a6a74]">
               Internal workflow for comparing production and staging URLs before handoff.

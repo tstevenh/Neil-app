@@ -16,9 +16,9 @@ export const metadata: Metadata = {
   title: "Meta & URL QA Checker",
   description: "Compare production and staging pages for SEO/content QA.",
   icons: {
-    icon: "/digirx-logo.svg",
-    shortcut: "/digirx-logo.svg",
-    apple: "/digirx-logo.svg",
+    icon: "/brand-logo",
+    shortcut: "/brand-logo",
+    apple: "/brand-logo",
   },
 };
 

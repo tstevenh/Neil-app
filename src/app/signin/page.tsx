@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { getSupabaseBrowser } from "@/lib/supabase-browser";
 
@@ -52,7 +51,7 @@ export default function SignInPage() {
   return (
     <main className="min-h-screen bg-[#f3fbfd] p-8 text-slate-900">
       <div className={`mx-auto mt-16 max-w-md space-y-4 p-8 ${cardClass}`}>
-        <Image src="/digirx-logo.svg" alt="DigiRX" width={144} height={50} />
+        <img src="/brand-logo" alt="DigiRX" width="144" height="50" className="h-auto w-36" />
         <h1 className="text-4xl font-medium text-[#101828]">Sign In</h1>
         <p className="text-sm text-[#5a6a74]">Use your account to access saved comparison runs.</p>
         <input
