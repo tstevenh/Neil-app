@@ -20,7 +20,8 @@ import {
 } from "@/lib/runtime-config";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 
-const PROCESS_ROWS_PER_TICK = 1;
+const PROCESS_ROWS_PER_TICK = 3;
+const DISCOVERY_COMPARISONS_PER_TICK = 3;
 type RunMode = "standard" | "discover_stream";
 const activeRunTicks = new Set<string>();
 const DISCOVERY_JOB_READ_RETRY_COUNT = 3;
@@ -528,8 +529,13 @@ async function processDiscoveryRunTick(run: RunRow) {
     fatalError = true;
   }
 
-  const pending = isDiscoveryComplete(state) ? getNextPendingComparison(state) : null;
-  if (pending && !fatalError) {
+  let remainingComparisons = DISCOVERY_COMPARISONS_PER_TICK;
+  while (!fatalError && remainingComparisons > 0) {
+    const pending = isDiscoveryComplete(state) ? getNextPendingComparison(state) : null;
+    if (!pending) {
+      break;
+    }
+
     let result: CompareResult;
     try {
       const prefetchedProductionPage = getDiscoveryPageSnapshot(state, "production", pending.pathKey);
@@ -548,6 +554,7 @@ async function processDiscoveryRunTick(run: RunRow) {
 
     await upsertResult(latest.id, pending.rowIndex, result);
     markComparisonProcessed(state, pending.rowIndex);
+    remainingComparisons -= 1;
   }
 
   const summary = summarizeDiscoveryState(state);
